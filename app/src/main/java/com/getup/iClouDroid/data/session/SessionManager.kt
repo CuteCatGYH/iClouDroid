@@ -1,0 +1,79 @@
+package com.getup.iClouDroid.data.session
+
+import android.content.Context
+import android.content.SharedPreferences
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKeys
+
+class SessionManager(context: Context) {
+
+    private val prefs: SharedPreferences by lazy {
+        try {
+            val masterKeyAlias = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC)
+
+            EncryptedSharedPreferences.create(
+                PREFS_NAME,
+                masterKeyAlias,
+                context,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.values()[0],
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            )
+        } catch (e: Exception) {
+            // Fallback to standard SharedPreferences if KeyStore fails on custom ROMs/emulators
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        }
+    }
+
+    fun saveSession(
+        cookieStr: String,
+        isChinaMainland: Boolean,
+        dsid: String? = null,
+        ckDatabaseUrl: String? = null
+    ) {
+        prefs.edit().apply {
+            putString(KEY_COOKIE_STR, cookieStr)
+            putBoolean(KEY_IS_CHINA, isChinaMainland)
+            putString(KEY_DSID, dsid)
+            putString(KEY_CK_DB_URL, ckDatabaseUrl)
+            putBoolean(KEY_IS_LOGGED_IN, true)
+            apply()
+        }
+    }
+
+    fun setChinaMainland(isChinaMainland: Boolean) {
+        prefs.edit().putBoolean(KEY_IS_CHINA, isChinaMainland).apply()
+    }
+
+    fun updateRouteInfo(dsid: String?, ckDatabaseUrl: String?) {
+        prefs.edit().apply {
+            putString(KEY_DSID, dsid)
+            putString(KEY_CK_DB_URL, ckDatabaseUrl)
+            apply()
+        }
+    }
+
+    fun clearSession() {
+        val currentRegion = isChinaMainland()
+        prefs.edit().clear().apply()
+        setChinaMainland(currentRegion)
+    }
+
+    fun getCookieString(): String? = prefs.getString(KEY_COOKIE_STR, null)
+
+    fun isChinaMainland(): Boolean = prefs.getBoolean(KEY_IS_CHINA, true)
+
+    fun getDsid(): String? = prefs.getString(KEY_DSID, null)
+
+    fun getCkDatabaseUrl(): String? = prefs.getString(KEY_CK_DB_URL, null)
+
+    fun isLoggedIn(): Boolean = prefs.getBoolean(KEY_IS_LOGGED_IN, false) && !getCookieString().isNullOrBlank()
+
+    companion object {
+        private const val PREFS_NAME = "icloudroid_encrypted_session"
+        private const val KEY_COOKIE_STR = "cookie_string"
+        private const val KEY_IS_CHINA = "is_china_mainland"
+        private const val KEY_DSID = "dsid"
+        private const val KEY_CK_DB_URL = "ck_database_url"
+        private const val KEY_IS_LOGGED_IN = "is_logged_in"
+    }
+}

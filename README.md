@@ -1,0 +1,111 @@
+# iClouDroid
+
+> **Android 原生 iCloud 照片客户端与自动备份工具**  
+> 基于 **Kotlin (Jetpack Compose)** + **Go (gomobile .aar)** 混合架构，旨在解决 Android 与 Apple 跨生态下的照片浏览、双向/单向增量自动同步与动态照片（Motion Photo / Live Photo）互转痛点。
+
+---
+
+## 🌟 核心特性
+
+- 🔐 **混合安全鉴权**：通过 Android WebView 安全完成 Apple ID 密码输入与 2FA 双重认证，自动拦截并加密存储 `TOKEN`、`HSA-TRUST`、`PCS-CloudKit` 三大关键凭证。
+- 🌏 **双区动态路由**：支持**中国大陆（云上贵州 `icloud.com.cn`）**与**国际区（`icloud.com`）**自动解析分配的 CloudKit (`ckdatabasews`) 专属接入节点。
+- ⚡ **Go 语言高性能协议底座**：复用 `rclone` 网络层，逆向 CloudKit 私有 API，实现会话保活与数据高并发传输。
+- 📱 **现代 Compose UI**：基于 Material 3 Design，自适应折叠屏与大屏布局。
+
+---
+
+## 📐 架构设计
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                        Android (Kotlin + Compose)                      │
+│                                                                        │
+│  [AuthScreen] ──► [ICloudWebView] (官方登录页: .com.cn / .com)          │
+│                          │                                             │
+│                          ▼ (完成密码 + 2FA 认证)                        │
+│                  [CookieManager] (提取 Cookie 字符串)                    │
+│                          │                                             │
+│                          ▼                                             │
+│                  [SessionManager] (DataStore / EncryptedSharedPref)    │
+│                          │                                             │
+│                          ▼ (传输凭证 + 节点标识)                         │
+│                    [AuthViewModel]                                     │
+└──────────────────────────┬─────────────────────────────────────────────┘
+                           │ JNI (Icloudcore.initSession)
+                           ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                        Go 核心层 (go-core)                              │
+│                                                                        │
+│  [InitSession] ──► [HTTP Client & CookieJar] (注入 Header & Origin)    │
+│                           │                                            │
+│                           ▼                                            │
+│   POST https://setup.icloud.com[.cn]/setup/ws/1/accountLogin            │
+│                           │                                            │
+│                           ▼                                            │
+│     解析 webservices 字典 ──► 提取 ckdatabasews.url & dsid               │
+│                           │                                            │
+│                           ▼                                            │
+│      返回 JSON 给 Kotlin ──► 渲染“登录成功 & 节点路由”状态                │
+└──────────────────────────┴─────────────────────────────────────────────┘
+```
+
+---
+
+## 🚦 当前进度与 Roadmap
+
+- [x] **Phase 0: 基础工程与 gomobile 交叉编译**
+  - [x] Go 核心层模块 (`icloudcore`) 初始化与 `gomobile` 环境打通。
+  - [x] 自动构建脚本 `scripts/build_aar.sh` 实现一键输出 `icloudcore.aar`。
+  - [x] Jetpack Compose + Material 3 + 协程整合，模拟器实机调用 JNI 连通性测试通过。
+- [x] **Phase 1: 混合鉴权与动态路由 (已完成)**
+  - [x] WebView 登录拦截器与 Cookie 强校验（`TOKEN` / `HSA-TRUST` / `PCS-CloudKit`）。
+  - [x] Go 核心层 `/validate` 动态解析 `ckdatabasews.url` 与 `dsid`。
+  - [x] 本地加密 Session 存储与状态流展示。
+  - [x] 真机验证：18 项 Cookie 全部捕获，三要素齐全，`dsid=20118126497`，路由 `https://p203-ckdatabasews.icloud.com.cn:443`，冷启动可静默恢复。
+  - [ ] 遗留项：Token 静默刷新回调、跨子域 Cookie 实测验证（详见 [TODO.md](TODO.md) Phase 1 遗留项）。
+
+> 📖 已修复问题案例、根因分析与验证记录见 **[CHANGELOG_ISSUES.md](CHANGELOG_ISSUES.md)**。
+- [ ] **Phase 2: 图库拉取、万级分页与本地缓存**
+- [ ] **Phase 3: Android 相册自动备份 (增量上传与秒传去重)**
+- [ ] **Phase 4: 跨生态深度适配 (Motion Photo / Live Photo 互转)**
+
+---
+
+## ⚠️ 关键注意事项与风险规避
+
+1. **国区（云上贵州）与国际区 Header 隔离**：
+   - 向苹果发送的所有请求必须严格包含匹配的 `Origin` 与 `Referer`（国区：`https://www.icloud.com.cn`，国际区：`https://www.icloud.com`）。混用会导致 `421 Misdirected Request`。
+2. **2FA 信任凭证 (HSA-TRUST)**：
+   - 登录时用户须勾选“信任此浏览器”，以获得有效期为 30~60 天的 `X-APPLE-WEBAUTH-HSA-TRUST` 凭证用于静默刷新 Token。
+3. **图片下载直链有效期**：
+   - CloudKit 产生的临时下载 URL 有效期为 1~2 小时。加载缓存时需以永久静态 `recordName` 作为主键。
+
+---
+
+## 🛠️ 环境要求与构建步骤
+
+### 开发环境要求
+- **Go**: 1.21+ (推荐 1.27)
+- **Java/JDK**: JDK 17+ (建议使用 Android Studio 随附的 JBR)
+- **Android SDK**: API Level 35+, NDK 26+
+
+### 编译构建流程
+
+1. **打包 Go 核心层 AAR**：
+   ```bash
+   ./scripts/build_aar.sh
+   ```
+   *该脚本会自动检测 JAVA_HOME、ANDROID_HOME 及 ANDROID_NDK_HOME，并在 `app/libs/` 下生成 `icloudcore.aar`。*
+
+2. **编译并部署 Android App**：
+   ```bash
+   ./gradlew :app:assembleDebug
+   ```
+
+---
+
+## 📜 许可与参考
+
+本项目开发参考了以下成熟开源实现：
+- [rclone/rclone](https://github.com/rclone/rclone) - Session 与 HTTP 网络底座
+- [icloud-photos-downloader/icloud_photos_downloader](https://github.com/icloud-photos-downloader/icloud_photos_downloader) - CloudKit `ckdatabasews` 协议与 API 结构字典
