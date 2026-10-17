@@ -68,6 +68,22 @@ class SessionManager(context: Context) {
 
     fun isLoggedIn(): Boolean = prefs.getBoolean(KEY_IS_LOGGED_IN, false) && !getCookieString().isNullOrBlank()
 
+    /**
+     * Monotonic counter of the Go core session generation.
+     *
+     * Every rebuild of the Go-side [Session] mints new CDN signatures, which silently
+     * invalidates every previously issued `cvws.icloud-content.com` download URL. Rows stamped
+     * with an older generation are therefore known-stale and must be refreshed before use.
+     */
+    fun getSessionGeneration(): Int = prefs.getInt(KEY_SESSION_GENERATION, 0)
+
+    /** Increments and persists the session generation. Returns the new value. */
+    fun bumpSessionGeneration(): Int {
+        val next = getSessionGeneration() + 1
+        prefs.edit().putInt(KEY_SESSION_GENERATION, next).apply()
+        return next
+    }
+
     companion object {
         private const val PREFS_NAME = "icloudroid_encrypted_session"
         private const val KEY_COOKIE_STR = "cookie_string"
@@ -75,5 +91,6 @@ class SessionManager(context: Context) {
         private const val KEY_DSID = "dsid"
         private const val KEY_CK_DB_URL = "ck_database_url"
         private const val KEY_IS_LOGGED_IN = "is_logged_in"
+        private const val KEY_SESSION_GENERATION = "session_generation"
     }
 }

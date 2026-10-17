@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 type ValidateResponse struct {
@@ -18,7 +19,8 @@ type ValidateResponse struct {
 		URL    string `json:"url"`
 		Status string `json:"status"`
 	} `json:"webservices"`
-	PcsRequired bool `json:"pcsRequired"`
+	PcsRequired bool     `json:"pcsRequired"`
+	TrustTokens []string `json:"trustTokens"`
 }
 
 type SessionInitResult struct {
@@ -41,10 +43,74 @@ func generateClientID() string {
 
 // ValidateSession performs the setup/ws/1/validate handshake using established cookies.
 func (s *Session) ValidateSession() (*SessionInitResult, error) {
+	result, err := s.doValidate()
+	if err == nil && result != nil {
+		return result, nil
+	}
+
+	// Check if doValidate captured a new trustToken in CookieMap. If so, retry doValidate.
+	s.mu.RLock()
+	hasHsaTrust := s.CookieMap["X-APPLE-WEBAUTH-HSA-TRUST"] != ""
+	s.mu.RUnlock()
+	if hasHsaTrust {
+		retryResult, retryErr := s.doValidate()
+		if retryErr == nil && retryResult != nil {
+			return retryResult, nil
+		}
+	}
+
+	// If validate failed with 421 or error, attempt alternate regional endpoint (CN <-> Global)
+	s.mu.Lock()
+	origBaseURL := s.BaseURL
+	origOrigin := s.Origin
+	origReferer := s.Referer
+	origIsChina := s.IsChinaMainland
+
+	if s.IsChinaMainland {
+		s.BaseURL = GlobalBaseURL
+		s.Origin = GlobalOrigin
+		s.Referer = GlobalReferer
+		s.IsChinaMainland = false
+	} else {
+		s.BaseURL = ChinaMainlandBaseURL
+		s.Origin = ChinaMainlandOrigin
+		s.Referer = ChinaMainlandReferer
+		s.IsChinaMainland = true
+	}
+	s.mu.Unlock()
+
+	altResult, altErr := s.doValidate()
+	if altErr == nil && altResult != nil {
+		return altResult, nil
+	}
+
+	// Restore original region settings if alternate region also failed
+	s.mu.Lock()
+	s.BaseURL = origBaseURL
+	s.Origin = origOrigin
+	s.Referer = origReferer
+	s.IsChinaMainland = origIsChina
+	s.mu.Unlock()
+
+	// Try accountLogin remediation using HSA-TRUST token or auth token if available
+	remedyResult, remedyErr := s.TryAccountLoginRemediation()
+	if remedyErr == nil && remedyResult != nil {
+		return remedyResult, nil
+	}
+
+	return nil, fmt.Errorf("AUTH_EXPIRED: iCloud 登录凭证已失效或 2FA 信任到期，请重新登录。")
+}
+
+func (s *Session) doValidate() (*SessionInitResult, error) {
+	s.mu.RLock()
+	baseURL := s.BaseURL
+	isChina := s.IsChinaMainland
+	s.mu.RUnlock()
+
 	clientID := generateClientID()
 	validateURL := fmt.Sprintf(
 		"%s/setup/ws/1/validate?clientBuildNumber=2422Hotfix23&clientMasteringNumber=2422Hotfix23&clientId=%s&clientVersion=2.1",
-		s.BaseURL,
+		baseURL,
 		clientID,
 	)
 
@@ -85,26 +151,24 @@ func (s *Session) ValidateSession() (*SessionInitResult, error) {
 			Success:       true,
 			DSID:          s.DSID,
 			CKDatabaseURL: s.CKDatabaseURL,
-			IsChina:       s.IsChinaMainland,
+			IsChina:       isChina,
 		}, nil
 	}
 
-	// If validate failed with 421 (Authentication required) or 401,
-	// attempt remediation using accountLogin if HSA-TRUST token is available.
-	if resp.StatusCode == 421 || resp.StatusCode == 401 {
-		remedyResult, remedyErr := s.TryAccountLoginRemediation()
-		if remedyErr == nil && remedyResult != nil {
-			return remedyResult, nil
-		}
-		// If remediation failed, format clear AuthExpired error message
-		return nil, fmt.Errorf("AUTH_EXPIRED: session validation failed (HTTP %d). HSA-TRUST renewal failed: %v", resp.StatusCode, remedyErr)
+	// Unmarshal error response to check if Apple returned updated trustTokens
+	var errResp ValidateResponse
+	if err := json.Unmarshal(bodyBytes, &errResp); err == nil && len(errResp.TrustTokens) > 0 {
+		s.mu.Lock()
+		s.CookieMap["X-APPLE-WEBAUTH-HSA-TRUST"] = errResp.TrustTokens[0]
+		s.UpdatedCookies = true
+		s.mu.Unlock()
 	}
 
 	preview := string(bodyBytes)
-	if len(preview) > 512 {
-		preview = preview[:512] + "..."
+	if len(preview) > 256 {
+		preview = preview[:256] + "..."
 	}
-	return nil, fmt.Errorf("validate failed with status %d: %s", resp.StatusCode, preview)
+	return nil, fmt.Errorf("validate HTTP %d: %s", resp.StatusCode, preview)
 }
 
 // TryAccountLoginRemediation tries to renew session credentials via /setup/ws/1/accountLogin
@@ -114,6 +178,9 @@ func (s *Session) TryAccountLoginRemediation() (*SessionInitResult, error) {
 	hsaTrust := s.CookieMap["X-APPLE-WEBAUTH-HSA-TRUST"]
 	token := s.CookieMap["X-APPLE-WEBAUTH-TOKEN"]
 	dsWebToken := s.CookieMap["X-APPLE-DS-WEB-SESSION-TOKEN"]
+	authUser := s.CookieMap["X-APPLE-WEBAUTH-USER"]
+	authLogin := s.CookieMap["X-APPLE-WEBAUTH-LOGIN"]
+	dsid := s.DSID
 	s.mu.RUnlock()
 
 	if hsaTrust == "" && token == "" && dsWebToken == "" {
@@ -125,8 +192,22 @@ func (s *Session) TryAccountLoginRemediation() (*SessionInitResult, error) {
 		effectiveToken = dsWebToken
 	}
 
+	accountName := authUser
+	if strings.HasPrefix(accountName, "d=") {
+		accountName = strings.TrimPrefix(accountName, "d=")
+	}
+	if accountName == "" {
+		accountName = authLogin
+	}
+	if accountName == "" {
+		accountName = dsid
+	}
+
 	loginPayload := map[string]interface{}{
 		"extended_login": true,
+	}
+	if accountName != "" {
+		loginPayload["accountName"] = accountName
 	}
 	if effectiveToken != "" {
 		loginPayload["dsWebAuthToken"] = effectiveToken

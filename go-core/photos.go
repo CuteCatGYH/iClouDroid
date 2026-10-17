@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 )
 
 // Desired keys to fetch from CloudKit records
@@ -373,9 +372,11 @@ func parseRecords(rawRecords []CKRecord) ([]PhotoItem, []string) {
 		if assetDate == 0 {
 			assetDate = addedDate
 		}
-		if assetDate == 0 {
-			assetDate = time.Now().UnixMilli()
-		}
+		// P2-016: never fall back to time.Now(). An asset with no date would otherwise get a
+		// BRAND NEW sort key on every page fetch, so the same row keeps migrating through the
+		// `ORDER BY assetDate DESC` list. Room then re-invalidates the PagingSource on every
+		// APPEND and the grid's itemCount collapses (observed: 305 -> 60), which is what the
+		// user perceives as "jumped back to the top". A stable 0 sorts last and never moves.
 
 		isFav := asset.Fields["isFavorite"].AsBool()
 		isHidden := asset.Fields["isHidden"].AsBool()
@@ -422,6 +423,15 @@ func parseRecords(rawRecords []CKRecord) ([]PhotoItem, []string) {
 
 	// For any standalone masters that didn't have an asset in this batch,
 	// create items so Android can cache or link them.
+	//
+	// P2-016: these orphans have no CPLAsset, hence no real assetDate. They used to be stamped
+	// with time.Now(), which made the SAME master come back with a NEW sort key on every single
+	// page fetch. Because Android orders by `assetDate DESC`, that pinned every orphan to the top
+	// of the list and re-shuffled it once per APPEND — Room invalidated the PagingSource each time
+	// and the grid visibly jumped back to the top.
+	//
+	// Use a stable 0 instead: it sorts to the bottom (DESC) and, crucially, never changes, so a
+	// master always maps to the same row position across fetches.
 	for mID, m := range masters {
 		if !matchedMasters[mID] {
 			mediaType := "IMAGE"
@@ -436,8 +446,8 @@ func parseRecords(rawRecords []CKRecord) ([]PhotoItem, []string) {
 				ID:            mID,
 				MasterID:      mID,
 				Filename:      m.filename,
-				AssetDate:     time.Now().UnixMilli(),
-				AddedDate:     time.Now().UnixMilli(),
+				AssetDate:     0, // P2-016: never time.Now() — must be stable across fetches
+				AddedDate:     0,
 				MediaType:     mediaType,
 				ItemType:      m.itemType,
 				Width:         m.width,

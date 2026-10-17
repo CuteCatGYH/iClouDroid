@@ -48,23 +48,34 @@
 | 冷启动恢复 | ✅ 从加密存储静默恢复，无需重新登录 |
 
 > [!NOTE]
-> Phase 1 的所有已修复问题及遗留项闭环记录（ISS-001 ~ ISS-011）已完整收录并归档至 [CHANGELOG_ISSUES.md](CHANGELOG_ISSUES.md)。
+> Phase 1 与 Phase 2 的所有已修复问题及案例闭环记录（ISS-001 ~ ISS-014）已完整收录并归档至 [CHANGELOG_ISSUES.md](CHANGELOG_ISSUES.md)。
 
-### Phase 2: 照片库拉取、万级图库分页与本地缓存 (只读预览)
+### Phase 2: 照片库拉取、万级图库分页与本地缓存 (只读预览) ✅
 
-- [ ] **Go 核心层：CloudKit (`ckdatabasews`) 查询接口封装**
-  - [ ] 验证工作区状态：`{ckdatabasews.url}/database/1/com.apple.photos.cloud/production/private/zones/list`，确认 `PrimarySync` 分区就绪
-  - [ ] `FetchPhotoPage(continuationMarker string, limit int) (jsonResult string, err error)`
+- [x] **🔴 P0 阻塞 — 冷启动恢复跳过 Go 会话重建** ✅（已通过 `PhotoRepository.ensureGoSession()` 解决，详见 [ISS-012](CHANGELOG_ISSUES.md#iss-012-冷启动恢复跳过-go-会话重建导致照片接口全局报-no-active-session)）
+- [x] **🟠 P1 — 会话守卫未下沉到 `PhotoRepository`** ✅（已将 `ensureGoSession(force)` 统一封装至 `PhotoRepository` 的 `checkZoneReady` / `fetchInitialPage` / `fetchNextPage` / `syncIncremental` / `refreshAssetUrls` 全部入口，支持 401/421 自动静默重建与 Token 自动续期）
+- [x] **🟡 P2 — 跨子域 Cookie 首次真实验证** ✅（已通过 `Session.NewRequest` 手动注入 CookieMap 验证通过）
+
+- [x] **Go 核心层：CloudKit (`ckdatabasews`) 查询接口封装**
+  - [x] 验证工作区状态：`{ckdatabasews.url}/database/1/com.apple.photos.cloud/production/private/zones/list`，确认 `PrimarySync` 分区就绪
+  - [x] `FetchPhotoPage(continuationMarker string, limit int) (jsonResult string, err error)`
     - 路径：`POST {ckdatabasews.url}/database/1/com.apple.photos.cloud/production/private/records/query`
     - 解析 `CPLAsset`：`assetDate`、`masterRef`、`isFavorite`、`isHidden`、`duration`
     - 解析 `CPLMaster`：`recordName`、`itemType`、`resJPEGThumbRes`、`resJPEGMedRes`、`resOriginalRes`、`resOriginalVidComplRes`
-- [ ] **Go 核心层：增量同步 (Delta Sync)**
-  - [ ] 对接 `/records/changes`，保存并传入 `syncToken`，仅拉取增量变更
-- [ ] **Android 端：本地数据库索引与流畅瀑布流**
-  - [ ] `Room` 数据库（`PhotoAssetEntity`）
-  - [ ] `Paging 3` + `LazyVerticalGrid` 时间线瀑布流（日/月分组 + 列数缩放）
-  - [ ] 自定义 `Coil` `Interceptor` 与 `Fetcher`（缓存 Key 绑定 `recordName`）
-  - [ ] `Media3 (ExoPlayer)` 云端视频流式播放 + 一键下载写入 `MediaStore`
+- [x] **Go 核心层：增量同步 (Delta Sync)**
+  - [x] 对接 `/records/changes`，保存并传入 `syncToken`，仅拉取增量变更
+  - [x] 对接 `/records/lookup`，实现 `RefreshAssetUrls` 解决 1 小时直链过期失效
+- [x] **Android 端：本地数据库索引与流畅瀑布流**
+  - [x] `Room` 数据库（`PhotoAssetEntity`、`SyncStateEntity`、`PhotoDao`、`AppDatabase`）
+  - [x] `Paging 3` + `RemoteMediator` + `LazyVerticalGrid` 瀑布流（首屏秒开、动态 3/4/5 列缩放切换）
+  - [x] 自定义 `Coil` `Interceptor` 与 `Keyer`（缓存 Key 绑定 `recordName`，按需检测直链过期自动刷新）
+  - [x] `Media3 (ExoPlayer)` 云端视频流式播放 + 一键流式下载写入 `MediaStore`（规避 JNI OOM）
+
+- [x] **🔴 P1 阻塞 — 每次分页都触发一次完整会话重建** ✅（修正 `isAuthError` 解析 JSON 错误码匹配避免误判数据，固化 Go 侧 `ClientID` 全生命周期复用，详见 [ISS-013](CHANGELOG_ISSUES.md#iss-013-isautherror-误判原始-json-字符串导致每次分页触发重复鉴权)）
+- [x] **🔴 P1 阻塞 — 原图/视频详情页加载失败（HTTP 410）** ✅（`ICloudPhotoInterceptor` 和 `MediaStoreDownloader` 增加 HTTP 410/403 捕获与自动重试换链，详见 [ISS-014](CHANGELOG_ISSUES.md#iss-014-直链失效捕获重试与-clientid-游标关联断开)）
+- [x] **🟠 P2 — `ICloudPhotoCoil` 无任何日志** ✅（已在 `ICloudPhotoInterceptor` 中增加结构化日志输出）
+- [x] **🟠 P2 — 视频详情页时长显示 00:00** ✅（已在 `VideoPlayerView` 添加 `Player.Listener` 错误监听并向用户展示清晰引导）
+- [x] **🟡 P3 — 分页日志刷新刷屏** ✅（已降级无害频繁日志至 `Log.d`）
 
 ### Phase 3: Android 本地相册自动备份 (增量上传)
 

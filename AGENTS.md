@@ -2,30 +2,61 @@
 
 本文档为参与 **iClouDroid** 项目协同开发的 AI Agent 提供架构导引、编码约定与编译调试规范。
 
+> [!IMPORTANT]
+> **新接手请先阅读第 5、6、7、9 节**（会话生命周期 / URL 生命周期 / 错误判定 / 验证纪律）。
+> 这四节集中了本项目踩过的所有重大坑，违反任意一条都会导致难排查的诡异问题。
+
+## 目录
+
+| 章节 | 内容 |
+| --- | --- |
+| [1](#1-工程目录结构说明) | 工程目录结构 |
+| [2](#2-编译与构建工作流) | 编译与构建工作流 |
+| [3](#3-go-跨语言交互-gomobile-编写规范) | Go 跨语言交互 (gomobile) |
+| [4](#4-icloud-协议开发红线) | iCloud 协议开发红线 |
+| [5](#5-会话生命周期session-lifecycle) | 会话生命周期 |
+| [6](#6-url-生命周期与刷新规范) | URL 生命周期与刷新 |
+| [7](#7-错误判定规范) | 错误判定规范 |
+| [8](#8-日志与可观测性规范) | 日志与可观测性 |
+| [9](#9-验证纪律verification-discipline) | 验证纪律 |
+| [10](#10-代码结构导引android-层) | 代码结构导引 |
+| [11](#11-问题归档与文档维护) | 问题归档与文档维护 |
+| [12](#12-当前进度与下一步) | 当前进度与下一步 |
+
 ---
 
 ## 1. 工程目录结构说明
 
 ```
 /Users/syh/iClouDroid/
-├── TODO.md                 # 完整功能路线图与架构指导说明书
+├── TODO.md                 # 分阶段功能路线图
 ├── README.md               # 项目公开说明与快速上手
 ├── AGENTS.md               # AI Agent 指导规范 (本文件)
+├── CHANGELOG_ISSUES.md     # 已修复问题案例库 (ISS-001 ~)
+├── list.md                 # 待修复问题清单（含推荐方案）
 ├── scripts/
 │   └── build_aar.sh        # Go gomobile 交叉编译构建脚本 (关键!)
+├── docs/
+│   ├── PITFALLS.md         # 工程避坑指南
+│   ├── REFERENCE.md        # 参考开源项目源码对照
+│   └── ARCHIVE_PHASE1.md   # Phase 1 过程存档
 ├── go-core/                # Go 核心协议层 (go mod init icloudcore)
 │   ├── go.mod
-│   ├── core.go             # gomobile 导出主入口
-│   ├── session.go          # Session & 网络请求封装
-│   └── account.go          # CloudKit 账户登录与节点路由
+│   ├── core.go             # gomobile 导出入口、会话摘要
+│   ├── session.go          # Session、Cookie 解析与请求封装
+│   ├── account.go          # 账户登录、路由表解析、会话自愈
+│   ├── photos.go           # CloudKit 照片：zones/list、records/query|changes|lookup
+│   └── *_test.go           # 单测（可用 httptest 模拟 CloudKit）
 └── app/                    # Android 主工程 (Kotlin + Compose)
     ├── libs/
-    │   └── icloudcore.aar  # 由 scripts/build_aar.sh 自动生成的二进制依赖
+    │   └── icloudcore.aar  # 由 scripts/build_aar.sh 自动生成
     └── src/main/java/com/getup/iClouDroid/
         ├── MainActivity.kt
-        ├── data/session/   # 本地凭证加密存储
-        └── ui/auth/        # 鉴权 WebView 与登录 UI
+        ├── data/           # db / repository / coil / media / session
+        └── ui/             # auth / photos
 ```
+
+Android 层细分见第 10 节。
 
 ---
 
@@ -66,3 +97,245 @@
    - `X-APPLE-WEBAUTH-TOKEN`
    - `X-APPLE-WEBAUTH-HSA-TRUST`
    - `X-APPLE-WEBAUTH-PCS-CloudKit`
+3. **Cookie 跨子域手动注入**：
+   不要依赖 `cookiejar` 自动匹配。`golang.org/x/net/publicsuffix` 会把 `com.cn` 视为公共后缀，**拒绝**向父域下发 Cookie；且 CloudKit 节点 (`pXX-ckdatabasews.icloud.com.cn`) 与对象存储 (`cvws.icloud-content.com.cn`) 属不同子域。必须由 `Session.CookieMap` 在 `NewRequest` 中显式拼装 `Cookie` Header。
+4. **下载直链是易碎品**：
+   `cvws.icloud-content.com[.cn]` 返回的 URL 带一次性签名，**会话重建即失效**（可能只隔 10 秒），并非固定 1 小时。任何使用 URL 的路径均须具备刷新能力，详见第 6 节。
+
+---
+
+## 5. 会话生命周期（Session Lifecycle）
+
+> 踩坑记录：ISS-012（冷启动丢会话）、ISS-016（generation 洪泛）。
+
+### 5.1 Go 侧 `currentSession` 是进程级全局指针
+
+App 进程冷启动后，Go 层的 `currentSession` 必为 `nil`。**切勿**把本地缓存的 `dsid` / `ckDatabaseUrl` 当作「会话已就绪」的依据 —— 它们只是服务端路由快照，不代表 `*Session` 指针存在。
+
+所有需要 Go 会话的操作，必须先经过 [PhotoRepository.ensureGoSession()](file:///Users/syh/iClouDroid/app/src/main/java/com/getup/iClouDroid/data/repository/PhotoRepository.kt) 守卫：
+
+```kotlin
+// 判定依据：Go 层自报的 Session 摘要，而非本地缓存
+val summaryStr = Icloudcore.getSessionStateSummary()
+val hasActiveSession = summaryJson.optBoolean("hasAuthToken", false) &&
+    summaryJson.optString("ckDatabaseURL", "").isNotBlank()
+```
+
+### 5.2 会话重建是「昂贵操作」
+
+一次重建 = 一次 `/validate` 网络往返（1~2s）+ **全部已签发 URL 立即作废** + 一次 generation 递增。
+
+> [!WARNING]
+> 任何触发重建的路径都必须极度保守。宁可提示用户「网络错误，请重试」，也不要贸然 `ensureGoSession(force = true)`。
+
+### 5.3 `bumpSessionGeneration()` 只能调一次
+
+**只能在 `initSession` 真正成功后**递增。绝不可以在「会话已就绪」的快速路径上调用 —— 该路径每次 API 请求都会经过，会让 generation 每几十毫秒 +1，导致每一格缩略图都变成「代际过期」并各发一次 `/records/lookup`（即 URL 刷新洪泛）。
+
+### 5.4 会话代际机制
+
+| 角色 | 字段 | 说明 |
+| --- | --- | --- |
+| `SessionManager` | `session_generation` | 持久化的单调递增计数器 |
+| `PhotoAssetEntity` | `sessionGeneration` | 记录入库时打戳 |
+
+判定：`data.sessionGeneration != sessionManager.getSessionGeneration()` → 强制刷新。
+
+> [!CAUTION]
+> 刷新成功后**必须把当前 generation 回写到该行**，否则它永远停留在 stale 状态，每次加载都重复刷新。
+
+---
+
+## 6. URL 生命周期与刷新规范
+
+### 6.1 所有消耗 URL 的路径必须统一走刷新
+
+| 路径 | 事前检查 | 失败后重试 | 重试上限 |
+| --- | --- | --- | --- |
+| Coil 缩略图 | 代际 / 45min 年龄 | `ErrorResult` → 刷新重请 | 1 |
+| 图片详情 | — | `onError` → 刷新 → `reloadToken++` | 2 |
+| 视频播放 | — | 重建 `ExoPlayer` + `seekTo(lastPosition)` | 2 |
+| 相册下载 | 代际 / 年龄 | HTTP 403/410 捕获后换链 | 1 |
+
+### 6.2 刷新必须走 `PhotoRepository`，禁止直调 Go
+
+`refreshUrlsForMaster(masterId)` 内建三层去重：
+
+1. 同一 masterId 的 in-flight 请求合并（`Deferred` 共享）
+2. 5 分钟窗口内成功刷过的直接读 DB
+3. 会话刚重建时加 20~120ms 随机抖动，摊平突发
+
+批量场景用 `refreshUrlsForMasters(List<String>)`，一次 `/records/lookup` 搞定多个。
+
+> [!WARNING]
+> 若在拦截器 / UI 里绕过 `PhotoRepository` 直调 `Icloudcore.refreshAssetUrls()`，网格 60+ item 同时失败时就会瞬间发出几十个 `/records/lookup`，极易触发 Apple 限流。
+
+### 6.3 Coil 缓存 Key 必须绑定 `recordName`
+
+内存与磁盘缓存 Key 使用 `icloud_{recordName}_{quality}`，**绝不能**绑定会变化的 `downloadURL`，否则签名一换缓存全废。
+
+---
+
+## 7. 错误判定规范
+
+> 踩坑记录：ISS-001（Cookie 静默丢弃）、ISS-015（base64 误伤）。
+
+### 7.1 禁止对原始 JSON 做子串匹配
+
+```kotlin
+// ❌ 绝对禁止：CloudKit 的 base64 continuationMarker 会随机命中 "401"/"421"
+jsonStr.contains("401")
+```
+
+必须结构化解析，按优先级：
+
+1. Go 层结构化 `errorCode == "AUTH_EXPIRED"`
+2. `success == false` 才继续
+3. `httpStatus in {401, 421}`
+4. 仅对 `errorMessage` 字段用 `\b` 词边界正则匹配 `HTTP 401/421`
+5. 解析异常一律返回 `false`（失败即放过，绝不误触发昂贵重建）
+
+### 7.2 HTTP 状态码从异常对象读，不从文本猜
+
+```kotlin
+val code = (error.cause as? HttpDataSource.InvalidResponseCodeException)?.responseCode
+```
+
+### 7.3 Go 层 `net/http` 对非法 Cookie 是静默丢弃
+
+不含 error 返回，只打一行警告。跨语言传 Cookie 必须 `strings.Trim(v, `"`)` 剥引号，并打印解析成功数量。
+
+---
+
+## 8. 日志与可观测性规范
+
+### 8.1 Logcat Tag 速查
+
+| Tag | 来源 | 用途 |
+| --- | --- | --- |
+| `ICloudAuth` | Android 鉴权探针 | Cookie 捕获、三要素校验、JNI 调用、区域判定 |
+| `PhotoRepository` | Android 数据层 | 会话重建、分页拉取、URL 刷新去重 |
+| `ICloudPhotoCoil` | Coil 拦截器 | 单图 load / refresh / ok / fail 全链路 |
+| `PhotoDetailViewer` | 详情页 | 播放器错误、图片重试 |
+| `MediaStoreDownloader` | 下载器 | 下载进度与换链 |
+| `GoLog` | Go 侧 `net/http` | Cookie 丢弃告警、TLS/HTTP 错误 |
+| `chromium` | WebView 内核 | 页面 JS 报错、CORS 噪音 |
+
+### 8.2 日志分级约定
+
+- **`Log.i`**：关键业务流程节点（会话重建开始、同步完成、下载成功）
+- **`Log.d`**：高频分页/刷新细节、Cookie 落盘对比
+- **`Log.w`**：可恢复异常（鉴权判定命中、刷新失败、重试）
+- **`Log.e`**：不可恢复异常
+
+> [!CAUTION]
+> **绝不打印完整签名 URL** —— 里面含一次性签名参数，可能被日志采集泄露。只打印 `URL.host`。
+
+### 8.3 已知无害噪音（排查时直接忽略）
+
+- `gatewayws.icloud.com.cn/.../batchRegisterToken` 的 CORS 报错
+- `wallpaper.svg was preloaded using link preload but not used`
+- `MediaCodec / Codec2 / c2.goldfish.*` 系列（模拟器软解）
+- `E/MESA: Failed to open rendernode`
+
+---
+
+## 9. 验证纪律（Verification Discipline）
+
+### 9.1 实机验证优先于单测绿
+
+**不要编译通过 + 单测绿就宣布完成。** 本项目多次出现过「编译成功、单测全过」但实机崩溃的案例（ISS-013、ISS-016 均如此）。
+
+修改完毕后必须：
+1. `./scripts/build_aar.sh`（如改了 Go）
+2. `gradle_build(":app:assembleDebug testDebugUnitTest")`
+3. **部署到 `emulator-5554` 并实际点击/滚动验证**
+4. **拉 logcat 确认无异常、无预期外的重复请求**
+
+### 9.2 可用工具
+
+| 工具 | 用途 |
+| --- | --- |
+| `ui_state` | 查看当前屏幕 UI 层级 + 截图 |
+| `adb_shell_input` | tap / swipe / keyevent 操作设备 |
+| `read_logcat` | 按 `applicationId` 过滤拉取日志 |
+| `deploy` | 构建并部署到设备 |
+
+### 9.3 性能验证基线
+
+| 指标 | 期望值 |
+| --- | --- |
+| 冷启动后 `Rebuilding Go core session` | ≤ 1 次 |
+| 连续滚动 3 页的额外重建次数 | 0 次 |
+| 同一 masterId 5 分钟内 `/records/lookup` | 1 次 |
+| 缩略图 `genStale=true` | 刷新后必须收敛为 `false` |
+
+---
+
+## 10. 代码结构导引（Android 层）
+
+```
+app/src/main/java/com/getup/iClouDroid/
+├── MainActivity.kt                  # 顶层状态路由：LoggedIn → PhotosScreen，否则 AuthScreen
+├── data/
+│   ├── db/                          # Room：PhotoAssetEntity(含 sessionGeneration)、SyncStateEntity、AppDatabase
+│   ├── repository/
+│   │   ├── PhotoRepository.kt        # 会话守卫 + 三层刷新去重 + 所有 Go 调用入口
+│   │   └── PhotoRemoteMediator.kt    # Paging 3 远端中介器
+│   ├── coil/ICloudPhotoCoil.kt       # Keyer 绑 recordName + 拦截器代际判定 + 失败重试 + 日志
+│   ├── media/MediaStoreDownloader.kt # 流式写入 MediaStore，规避 JNI OOM
+│   └── session/SessionManager.kt     # 加密存储 + session_generation 计数器
+└── ui/
+    ├── auth/                        # AuthScreen、AuthViewModel、ICloudWebView、AccountInfoDialog
+    └── photos/                      # PhotosScreen(gridState 保位)、PhotoGridItem、PhotoDetailViewer、PhotosViewModel
+```
+
+**分层约定**：
+- UI 层**不得**直接调 `Icloudcore.*`
+- 所有 Go 调用收敛到 `PhotoRepository`
+- 所有耗时读写在 `withContext(Dispatchers.IO)` 中执行
+
+---
+
+## 11. 问题归档与文档维护
+
+| 文档 | 职责 |
+| --- | --- |
+| [CHANGELOG_ISSUES.md](CHANGELOG_ISSUES.md) | 已修复问题案例库（ISS-001 ~），含现象/日志证据/根因/方案/验证 |
+| [list.md](list.md) | 待修复问题清单（含推荐方案），修完迁往 CHANGELOG |
+| [TODO.md](TODO.md) | 分阶段路线图 |
+| [docs/PITFALLS.md](docs/PITFALLS.md) | 工程避坑指南 |
+| [docs/REFERENCE.md](docs/REFERENCE.md) | 参考开源项目源码对照 |
+
+**归档规范**：
+- 修复真实 bug 后，必须在 `CHANGELOG_ISSUES.md` 新增条目，并更新顶部索引表
+- 若该问题暴露了**通用性陷阱**，同步补充到本文对应章节
+- 若已录入 `docs/PITFALLS.md`，在条目中互相引用
+
+---
+
+## 12. 当前进度与下一步
+
+| 阶段 | 状态 |
+| --- | --- |
+| Phase 0：跨语言工程与编译流水线 | ✅ 完成 |
+| Phase 1：混合鉴权与国区/国际区动态路由 | ✅ 完成 |
+| Phase 2：照片库拉取、万级图库分页与本地缓存（只读预览） | ✅ 完成 |
+| Phase 3：Android 本地相册自动备份（增量上传） | ⏳ 待开始 |
+| Phase 4：跨生态深度适配（Motion Photo ↔ Live Photo、折叠屏） | ⏳ 待开始 |
+
+### Phase 3 关键提醒
+
+1. **iCloud 上传协议无成熟开源实现**，需参考 [docs/REFERENCE.md](docs/REFERENCE.md) 第 3 节逆向
+2. **上传前必须查重** —— 重复上传会产生幽灵重复照片，无法删除
+3. **上传前校验 `X-APPLE-WEBAUTH-PCS-Photos` Cookie** —— 无此凭证无法写入照片库
+4. **EXIF 时间戳必须准确** —— iCloud 依赖 `assetDate` 排序，写错导致照片乱序
+5. **上传必须走文件路径 + `os.File` 流式**，详见第 3 节第 4 条
+
+### Phase 3 建议偿还的技术债
+
+- Go 层返回结构化 `errorCode` / `httpStatus` 字段，取代 Kotlin 侧正则兜底
+- Room 正式 Migration（目前 v2 使用 `fallbackToDestructiveMigration()`）
+- `refreshUrlsForMasters()` 批量刷新入口目前已就绪但未被消费，可在列表预加载时预热
+
+---
