@@ -1,4 +1,4 @@
-package com.getup.iClouDroid.ui.photos
+package com.getup.iClouDroid.feature.photos.ui
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background

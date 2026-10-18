@@ -1,8 +1,8 @@
 package com.getup.iClouDroid.data
 
-import com.getup.iClouDroid.data.coil.ICloudImageModel
-import com.getup.iClouDroid.data.coil.ICloudPhotoKeyer
-import com.getup.iClouDroid.data.db.PhotoAssetEntity
+import com.getup.iClouDroid.feature.photos.data.image.ICloudImageModel
+import com.getup.iClouDroid.feature.photos.data.image.ICloudPhotoKeyer
+import com.getup.iClouDroid.feature.photos.data.db.PhotoAssetEntity
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Test

@@ -1,4 +1,4 @@
-package com.getup.iClouDroid.data.db
+package com.getup.iClouDroid.feature.photos.data.db
 
 import androidx.room.Entity
 import androidx.room.PrimaryKey

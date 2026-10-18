@@ -1,4 +1,4 @@
-package com.getup.iClouDroid.ui.photos
+package com.getup.iClouDroid.feature.photos.ui
 
 import android.app.Application
 import android.content.Context
@@ -9,9 +9,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.paging.PagingData
 import androidx.paging.cachedIn
-import com.getup.iClouDroid.data.db.PhotoAssetEntity
-import com.getup.iClouDroid.data.media.MediaStoreDownloader
-import com.getup.iClouDroid.data.repository.PhotoRepository
+import com.getup.iClouDroid.IClouDroidApp
+import com.getup.iClouDroid.feature.photos.data.MediaStoreDownloader
+import com.getup.iClouDroid.feature.photos.data.db.PhotoAssetEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -31,7 +31,7 @@ sealed interface DownloadState {
 
 class PhotosViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val repository = PhotoRepository.getInstance(application)
+    private val repository = (application as IClouDroidApp).container.photoRepository
 
     val photosPagingData: Flow<PagingData<PhotoAssetEntity>> = repository.photoPagingFlow
         .cachedIn(viewModelScope)

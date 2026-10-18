@@ -65,7 +65,7 @@
   - [ ] 遗留项：Token 静默刷新回调、跨子域 Cookie 实测验证（详见 [TODO.md](TODO.md) Phase 1 遗留项）。
 
 > 📖 已修复问题案例、根因分析与验证记录见 **[CHANGELOG_ISSUES.md](CHANGELOG_ISSUES.md)**。
-- [ ] **Phase 2: 图库拉取、万级分页与本地缓存**
+- [x] **Phase 2: 图库拉取、万级分页与本地缓存 (只读预览)**
 - [ ] **Phase 3: Android 相册自动备份 (增量上传与秒传去重)**
 - [ ] **Phase 4: 跨生态深度适配 (Motion Photo / Live Photo 互转)**
 

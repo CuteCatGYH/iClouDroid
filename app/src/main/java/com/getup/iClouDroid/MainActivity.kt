@@ -17,12 +17,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import com.getup.iClouDroid.ui.AppShell
 import com.getup.iClouDroid.ui.auth.AccountInfoDialog
 import com.getup.iClouDroid.ui.auth.AuthScreen
 import com.getup.iClouDroid.ui.auth.AuthUiState
 import com.getup.iClouDroid.ui.auth.AuthViewModel
-import com.getup.iClouDroid.ui.photos.PhotosScreen
-import com.getup.iClouDroid.ui.photos.PhotosViewModel
+import com.getup.iClouDroid.feature.photos.ui.PhotosViewModel
 
 class MainActivity : ComponentActivity() {
 
@@ -55,8 +55,10 @@ class MainActivity : ComponentActivity() {
                         }
 
                         is AuthUiState.LoggedIn -> {
-                            PhotosScreen(
-                                viewModel = photosViewModel,
+                            // Authentication is an app-level concern; once it succeeds we hand off
+                            // to the shell, which owns section switching (photos / drive / notes).
+                            AppShell(
+                                photosViewModel = photosViewModel,
                                 onOpenAccountInfo = { showAccountDialog = true }
                             )
 

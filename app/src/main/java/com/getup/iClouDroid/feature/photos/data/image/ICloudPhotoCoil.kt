@@ -1,4 +1,4 @@
-package com.getup.iClouDroid.data.coil
+package com.getup.iClouDroid.feature.photos.data.image
 
 import android.content.Context
 import android.util.Log
@@ -9,10 +9,11 @@ import coil.key.Keyer
 import coil.request.ErrorResult
 import coil.request.ImageResult
 import coil.request.Options
-import com.getup.iClouDroid.data.db.PhotoAssetEntity
-import com.getup.iClouDroid.data.repository.PhotoRepository
-import com.getup.iClouDroid.data.repository.RefreshedUrls
 import com.getup.iClouDroid.data.session.SessionManager
+import com.getup.iClouDroid.di.AppContainer
+import com.getup.iClouDroid.feature.photos.data.PhotoRepository
+import com.getup.iClouDroid.feature.photos.data.RefreshedUrls
+import com.getup.iClouDroid.feature.photos.data.db.PhotoAssetEntity
 import java.net.URL
 
 data class ICloudImageModel(
@@ -69,11 +70,12 @@ internal object ImageLoadFailure {
     fun httpCodeOf(throwable: Throwable?): Int? =
         (throwable as? coil.network.HttpException)?.response?.code
 
+    /** The two statuses a CDN uses when a signed URL is no longer accepted. */
+    fun isExpiredUrlCode(code: Int?): Boolean = code == 403 || code == 410
+
     /** True when the failure means "this signed URL is no longer accepted by the CDN". */
-    fun isExpiredUrl(throwable: Throwable?): Boolean {
-        val code = httpCodeOf(throwable) ?: return false
-        return code == 403 || code == 410
-    }
+    fun isExpiredUrl(throwable: Throwable?): Boolean =
+        isExpiredUrlCode(httpCodeOf(throwable))
 }
 
 /**
@@ -195,9 +197,14 @@ object ICloudImageLoaderFactory {
     @Volatile
     private var INSTANCE: ImageLoader? = null
 
-    fun get(context: Context): ImageLoader {
+    /**
+     * Builds (once) the Coil loader for iCloud assets.
+     *
+     * Dependencies come from [com.getup.iClouDroid.di.AppContainer] rather than being constructed
+     * here, so the loader and the repositories share exactly one `SessionManager` instance.
+     */
+    fun get(context: Context, container: AppContainer): ImageLoader {
         return INSTANCE ?: synchronized(this) {
-            val repo = PhotoRepository.getInstance(context)
             val loader = ImageLoader.Builder(context)
                 .components {
                     // P2-010: iCloud hands back the native HEIC for `resOriginalRes`, and some of
@@ -208,7 +215,7 @@ object ICloudImageLoaderFactory {
                     // ImageDecoder handles gain maps and multi-image HEIF correctly.
                     add(ImageDecoderDecoder.Factory())
                     add(ICloudPhotoKeyer())
-                    add(ICloudPhotoInterceptor(repo, SessionManager(context.applicationContext)))
+                    add(ICloudPhotoInterceptor(container.photoRepository, container.sessionManager))
                 }
                 .crossfade(true)
                 .build()

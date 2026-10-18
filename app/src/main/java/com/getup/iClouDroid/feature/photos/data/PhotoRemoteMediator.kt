@@ -1,16 +1,15 @@
-package com.getup.iClouDroid.data.repository
+package com.getup.iClouDroid.feature.photos.data
 
 import androidx.paging.ExperimentalPagingApi
 import androidx.paging.LoadType
 import androidx.paging.PagingState
 import androidx.paging.RemoteMediator
-import com.getup.iClouDroid.data.db.AppDatabase
-import com.getup.iClouDroid.data.db.PhotoAssetEntity
+import com.getup.iClouDroid.feature.photos.data.db.PhotoAssetEntity
 
 @OptIn(ExperimentalPagingApi::class)
 class PhotoRemoteMediator(
     private val repository: PhotoRepository,
-    private val database: AppDatabase
+    private val database: PhotoDatabase
 ) : RemoteMediator<Int, PhotoAssetEntity>() {
 
     private val syncStateDao = database.syncStateDao()

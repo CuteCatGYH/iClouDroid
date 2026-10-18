@@ -1,4 +1,4 @@
-package com.getup.iClouDroid.data.db
+package com.getup.iClouDroid.feature.photos.data.db
 
 import androidx.paging.PagingSource
 import androidx.room.Dao

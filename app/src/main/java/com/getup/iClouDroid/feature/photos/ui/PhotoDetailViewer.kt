@@ -1,4 +1,4 @@
-package com.getup.iClouDroid.ui.photos
+package com.getup.iClouDroid.feature.photos.ui
 
 import android.text.format.Formatter
 import android.util.Log
@@ -66,11 +66,12 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import coil.compose.SubcomposeAsyncImage
 import coil.request.ImageRequest
-import com.getup.iClouDroid.data.coil.ICloudImageLoaderFactory
-import com.getup.iClouDroid.data.coil.ICloudImageModel
-import com.getup.iClouDroid.data.coil.ImageLoadFailure
-import com.getup.iClouDroid.data.db.PhotoAssetEntity
-import com.getup.iClouDroid.data.repository.PhotoRepository
+import com.getup.iClouDroid.di.rememberAppContainer
+import com.getup.iClouDroid.feature.photos.data.PhotoRepository
+import com.getup.iClouDroid.feature.photos.data.db.PhotoAssetEntity
+import com.getup.iClouDroid.feature.photos.data.image.ICloudImageLoaderFactory
+import com.getup.iClouDroid.feature.photos.data.image.ICloudImageModel
+import com.getup.iClouDroid.feature.photos.data.image.ImageLoadFailure
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -86,7 +87,8 @@ fun PhotoDetailViewer(
     onDownload: () -> Unit
 ) {
     val context = LocalContext.current
-    val repository = remember { PhotoRepository.getInstance(context) }
+    val container = rememberAppContainer()
+    val repository = container.photoRepository
     var showInfoSheet by remember { mutableStateOf(false) }
     val isVideo = photo.mediaType == "VIDEO" ||
         photo.filename.endsWith(".mp4", ignoreCase = true) ||
@@ -226,7 +228,8 @@ private fun ImageDetailView(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val imageLoader = remember { ICloudImageLoaderFactory.get(context) }
+    val container = rememberAppContainer()
+    val imageLoader = remember { ICloudImageLoaderFactory.get(context, container) }
 
     var reloadToken by remember(photo.id) { mutableIntStateOf(0) }
     var retryCount by remember(photo.id) { mutableIntStateOf(0) }

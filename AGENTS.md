@@ -276,24 +276,37 @@ val code = (error.cause as? HttpDataSource.InvalidResponseCodeException)?.respon
 
 ```
 app/src/main/java/com/getup/iClouDroid/
-├── MainActivity.kt                  # 顶层状态路由：LoggedIn → PhotosScreen，否则 AuthScreen
+├── IClouDroidApp.kt                   # Application，持有 AppContainer（已在 Manifest 注册）
+├── MainActivity.kt                    # 顶层状态路由：Checking → spinner；LoggedIn → AppShell；否则 AuthScreen
+├── di/
+│   ├── AppContainer.kt                # 手写 DI：所有 App 级依赖的唯一创建点
+│   └── LocalAppContainer.kt           # Context.appContainer() / rememberAppContainer()
 ├── data/
-│   ├── db/                          # Room：PhotoAssetEntity(含 sessionGeneration)、SyncStateEntity、AppDatabase
-│   ├── repository/
-│   │   ├── PhotoRepository.kt        # 会话守卫 + 三层刷新去重 + 所有 Go 调用入口
-│   │   └── PhotoRemoteMediator.kt    # Paging 3 远端中介器
-│   ├── coil/ICloudPhotoCoil.kt       # Keyer 绑 recordName + 拦截器代际判定 + 失败重试 + 日志
-│   ├── media/MediaStoreDownloader.kt # 流式写入 MediaStore，规避 JNI OOM
-│   └── session/SessionManager.kt     # 加密存储 + session_generation 计数器
+│   └── session/SessionManager.kt      # 加密存储 + session_generation 计数器（跨功能共享，留在顶层）
+├── feature/
+│   └── photos/                        # 照片功能（自包含）
+│       ├── data/
+│       │   ├── PhotoDatabase.kt        # 照片专属 Room 库（icloud_photos.db）
+│       │   ├── PhotoRepository.kt      # 会话守卫 + 三层刷新去重 + 所有 Go 调用入口
+│       │   ├── PhotoRemoteMediator.kt  # Paging 3 远端中介器
+│       │   ├── MediaStoreDownloader.kt # 流式写入 MediaStore，规避 JNI OOM
+│       │   ├── db/                     # PhotoAssetEntity(含 sessionGeneration)、SyncStateEntity、Dao
+│       │   └── image/ICloudPhotoCoil.kt # Keyer 绑 recordName + 拦截器代际判定 + 失败重试 + 日志
+│       └── ui/                         # PhotosScreen(gridState 保位)、PhotoGridItem、PhotoDetailViewer、PhotosViewModel
 └── ui/
-    ├── auth/                        # AuthScreen、AuthViewModel、ICloudWebView、AccountInfoDialog
-    └── photos/                      # PhotosScreen(gridState 保位)、PhotoGridItem、PhotoDetailViewer、PhotosViewModel
+    ├── AppShell.kt                    # 登录后的壳：底部导航 + 各功能入口
+    ├── PlaceholderScreen.kt           # 未实现功能的占位页
+    ├── navigation/Destinations.kt     # AppDestination 枚举（新增功能在此登记）
+    └── auth/                          # AuthScreen、AuthViewModel、ICloudWebView、AccountInfoDialog
 ```
 
 **分层约定**：
 - UI 层**不得**直接调 `Icloudcore.*`
 - 所有 Go 调用收敛到 `PhotoRepository`
 - 所有耗时读写在 `withContext(Dispatchers.IO)` 中执行
+- 依赖一律从 `AppContainer` 取，**不得**再新增 `getInstance()` 单例
+- 新增 iCloud 功能（Drive / 备忘录）= 在 `feature/` 下建自包含包 + 在 `AppDestination` 与
+  `AppShell` 登记 + 在 `AppContainer` 加一个 `lazy` 字段；**不**需改动认证逻辑或其他功能
 
 ---
 

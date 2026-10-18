@@ -1,4 +1,4 @@
-package com.getup.iClouDroid.ui.photos
+package com.getup.iClouDroid.feature.photos.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -27,9 +27,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.SubcomposeAsyncImage
 import coil.request.ImageRequest
-import com.getup.iClouDroid.data.coil.ICloudImageLoaderFactory
-import com.getup.iClouDroid.data.coil.ICloudImageModel
-import com.getup.iClouDroid.data.db.PhotoAssetEntity
+import com.getup.iClouDroid.di.rememberAppContainer
+import com.getup.iClouDroid.feature.photos.data.image.ICloudImageLoaderFactory
+import com.getup.iClouDroid.feature.photos.data.image.ICloudImageModel
+import com.getup.iClouDroid.feature.photos.data.db.PhotoAssetEntity
 import java.util.Locale
 
 @Composable
@@ -39,7 +40,8 @@ fun PhotoGridItem(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val imageLoader = ICloudImageLoaderFactory.get(context)
+    val container = rememberAppContainer()
+    val imageLoader = ICloudImageLoaderFactory.get(context, container)
     val model = ICloudImageModel.fromEntity(photo, ICloudImageModel.Quality.THUMB)
 
     Box(

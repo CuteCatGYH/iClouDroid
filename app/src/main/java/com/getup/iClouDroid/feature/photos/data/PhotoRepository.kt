@@ -1,4 +1,4 @@
-package com.getup.iClouDroid.data.repository
+package com.getup.iClouDroid.feature.photos.data
 
 import android.content.Context
 import android.util.Log
@@ -6,10 +6,9 @@ import androidx.paging.ExperimentalPagingApi
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.PagingData
-import com.getup.iClouDroid.data.db.AppDatabase
-import com.getup.iClouDroid.data.db.PhotoAssetEntity
-import com.getup.iClouDroid.data.db.SyncStateEntity
 import com.getup.iClouDroid.data.session.SessionManager
+import com.getup.iClouDroid.feature.photos.data.db.PhotoAssetEntity
+import com.getup.iClouDroid.feature.photos.data.db.SyncStateEntity
 import com.getup.icloudcore.Icloudcore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -32,7 +31,7 @@ data class RefreshedUrls(
 )
 
 class PhotoRepository(
-    private val database: AppDatabase,
+    private val database: PhotoDatabase,
     private val sessionManager: SessionManager
 ) {
     private val photoDao = database.photoDao()
@@ -166,7 +165,7 @@ class PhotoRepository(
      *
      * Bumping the counter (persisted) is what invalidates every previously minted download URL:
      * any [PhotoAssetEntity] stamped with an older generation is treated as stale by
-     * [com.getup.iClouDroid.data.coil.ICloudPhotoInterceptor] and force-refreshed instead of
+     * [com.getup.iClouDroid.feature.photos.data.image.ICloudPhotoInterceptor] and force-refreshed instead of
      * being requested with a dead signature.
      */
     private fun markSessionReady() {
@@ -785,18 +784,5 @@ class PhotoRepository(
          */
         private val AUTH_STATUS_REGEX =
             Regex("""(?:HTTP|status|StatusCode)\s*[:=]?\s*(?:401|421)\b""", RegexOption.IGNORE_CASE)
-
-        @Volatile
-        private var INSTANCE: PhotoRepository? = null
-
-        fun getInstance(context: Context): PhotoRepository {
-            return INSTANCE ?: synchronized(this) {
-                val db = AppDatabase.getInstance(context)
-                val sessionMgr = SessionManager(context.applicationContext)
-                val repo = PhotoRepository(db, sessionMgr)
-                INSTANCE = repo
-                repo
-            }
-        }
     }
 }

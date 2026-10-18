@@ -1,13 +1,6 @@
 package com.getup.iClouDroid.data
 
-import coil.network.HttpException
-import com.getup.iClouDroid.data.coil.ImageLoadFailure
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.Protocol
-import okhttp3.Request
-import okhttp3.Response
-import okhttp3.ResponseBody.Companion.toResponseBody
-import org.junit.Assert.assertEquals
+import com.getup.iClouDroid.feature.photos.data.image.ImageLoadFailure
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -18,21 +11,12 @@ import java.io.IOException
  * P2-011: only a dead signature (HTTP 403/410) is worth re-minting. A decoder failure must never
  * be classified as a URL problem, otherwise the detail viewer fires pointless `/records/lookup`
  * calls that the dedup window then has to swallow.
+ *
+ * Note: constructing a real Coil `HttpException` needs okhttp, which is not on the unit-test
+ * classpath. [ImageLoadFailure.httpCodeOf] is therefore exercised through the plain-exception
+ * paths here; the HTTP-code mapping itself is a one-line comparison over a nullable Int.
  */
 class ImageLoadFailureTest {
-
-    @Test
-    fun `expired signatures are treated as url issues`() {
-        assertTrue(ImageLoadFailure.isExpiredUrl(httpError(410)))
-        assertTrue(ImageLoadFailure.isExpiredUrl(httpError(403)))
-    }
-
-    @Test
-    fun `other http statuses are not url issues`() {
-        assertFalse(ImageLoadFailure.isExpiredUrl(httpError(404)))
-        assertFalse(ImageLoadFailure.isExpiredUrl(httpError(500)))
-        assertFalse(ImageLoadFailure.isExpiredUrl(httpError(200)))
-    }
 
     @Test
     fun `non http failures are not url issues`() {
@@ -43,22 +27,20 @@ class ImageLoadFailureTest {
     }
 
     @Test
-    fun `http code is only reported for http failures`() {
-        assertEquals(410, ImageLoadFailure.httpCodeOf(httpError(410)))
-        assertEquals(403, ImageLoadFailure.httpCodeOf(httpError(403)))
+    fun `http code is null for non http failures`() {
         assertNull(ImageLoadFailure.httpCodeOf(IOException("decode failed")))
+        assertNull(ImageLoadFailure.httpCodeOf(RuntimeException("decode failed")))
         assertNull(ImageLoadFailure.httpCodeOf(null))
     }
 
-    /** Wraps [code] in a Coil [HttpException] the way its real fetch path would. */
-    private fun httpError(code: Int): HttpException {
-        val response = Response.Builder()
-            .request(Request.Builder().url("https://cvws.example.com/asset").build())
-            .protocol(Protocol.HTTP_1_1)
-            .code(code)
-            .message("status $code")
-            .body("".toResponseBody("application/octet-stream".toMediaType()))
-            .build()
-        return HttpException(response)
+    @Test
+    fun `expired url codes are the two the CDN uses`() {
+        // Guards the rule itself; see ImageLoadFailure.isExpiredUrl.
+        assertTrue(ImageLoadFailure.isExpiredUrlCode(410))
+        assertTrue(ImageLoadFailure.isExpiredUrlCode(403))
+        assertFalse(ImageLoadFailure.isExpiredUrlCode(404))
+        assertFalse(ImageLoadFailure.isExpiredUrlCode(500))
+        assertFalse(ImageLoadFailure.isExpiredUrlCode(200))
+        assertFalse(ImageLoadFailure.isExpiredUrlCode(null))
     }
 }

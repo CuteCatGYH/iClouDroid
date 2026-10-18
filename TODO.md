@@ -87,6 +87,14 @@
 - [x] **排序键不稳定** ✅（`ORDER BY assetDate DESC, id ASC` + 复合索引）
 - [ ] **⚠️ 深翻页跳顶（P2-016）** — `RemoteMediator` 每次 APPEND 必 invalidate，属 Paging 3 架构性行为。当前为缓解态（`initialLoadSize=1200`），**根治待 UI 重构时一并解决**（详见 [ISS-021](CHANGELOG_ISSUES.md#iss-021-remotemediator-每次-append-必-invalidate导致深翻页跳顶)）
 
+#### 架构重构：多功能 iCloud 客户端演进 (全功能 App 骨架) ✅
+
+- [x] **手写 AppContainer 代替分散单例** ✅（创建 `AppContainer` 与 `IClouDroidApp`，统一注入 `SessionManager`、`PhotoDatabase` 与 `PhotoRepository`）
+- [x] **模块化包结构重构** ✅（拆分出 `feature/photos/` 自包含包，将数据/数据库/UI/Coil代码完全内聚）
+- [x] **数据库隔离设计** ✅（`AppDatabase` 重命名为 `PhotoDatabase`，专库专用，避免未来扩展 Drive/Notes 拖累照片表）
+- [x] **AppShell 壳层与多 tab 导航** ✅（新增 `AppShell` 底部导航，预留 Drive 与备忘录占位入口 `AppDestination`）
+- [x] **Context 容器定位自愈** ✅（`Context.appContainer()` 优先使用 `applicationContext`，解决 Compose 上下文层级查找崩溃）
+
 **Phase 2 收尾验证指标**（模拟器 Medium Phone API 37）：
 
 | 指标 | 结果 |
@@ -97,7 +105,7 @@
 | `Choreographer: Skipped` | **无** |
 | 滚动中 `itemCount` 塌陷 | **0 次**（index 平滑至 336，itemCount 稳定 1200） |
 | `go test ./...` | **ok** |
-| `testDebugUnitTest` | **12 passed, 0 failed** |
+| `testDebugUnitTest` | **11 passed, 0 failed** |
 
 ### Phase 3: Android 本地相册自动备份 (增量上传)
 

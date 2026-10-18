@@ -1,4 +1,4 @@
-package com.getup.iClouDroid.data.db
+package com.getup.iClouDroid.feature.photos.data.db
 
 import androidx.room.Entity
 import androidx.room.Index
@@ -38,9 +38,9 @@ data class PhotoAssetEntity(
     /**
      * Go core session generation at the time these URLs were minted.
      *
-     * A rebuilt Go [Session] invalidates every previously issued CDN signature immediately, so
-     * rows whose generation no longer matches the current one must be refreshed before use
-     * (see ISS-016 / P2-005).
+     * A rebuilt Go [com.getup.icloudcore.Session] invalidates every previously issued CDN
+     * signature immediately, so rows whose generation no longer matches the current one must be
+     * refreshed before use (see ISS-016 / P2-005).
      */
     val sessionGeneration: Int = 0
 )

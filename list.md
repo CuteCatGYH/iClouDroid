@@ -33,7 +33,7 @@
 | ~~[P2-014](#p2-014)~~ | ~~分页期间会话重建回归（17 秒内 4 次）~~ | 🔴 P0 | Android / Repository | ✅ 已修复（ISS-020） |
 | [P2-015](#p2-015) | Go 层缺结构化 `errorCode` / `httpStatus`（技术债） | 🟡 P2 | Go 核心层 | Kotlin 侧只能正则猜字符串 |
 | [P2-016](#p2-016-remotemediator-每次-append-必-invalidate导致深翻页跳顶) | `RemoteMediator` 每次 APPEND 必 invalidate，导致深翻页跳顶 | 🔴 P0 | Android / Paging | 已确诊；缓解态，待 UI 重构根治 |
-| [P2-017](#p2-017) | Go 层 `time.Now()` 作排序键兜底（已清理） | 🔴 P0 | Go 核心层 | ✅ 已修复 |
+| ~~[P2-017](#p2-017)~~ | ~~Go 层 `time.Now()` 作排序键兜底（已清理）~~ | 🔴 P0 | Go 核心层 | ✅ 已修复 |
 
 > [!NOTE]
 > P2-001 ~ P2-009 已完成修复并在 `emulator-5554` 实机验证。

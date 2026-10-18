@@ -1,4 +1,4 @@
-package com.getup.iClouDroid.data.media
+package com.getup.iClouDroid.feature.photos.data
 
 import android.content.ContentValues
 import android.content.Context
@@ -7,8 +7,8 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
-import com.getup.iClouDroid.data.db.PhotoAssetEntity
-import com.getup.iClouDroid.data.repository.PhotoRepository
+import com.getup.iClouDroid.feature.photos.data.db.PhotoAssetEntity
+import com.getup.iClouDroid.feature.photos.data.PhotoRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.InputStream
