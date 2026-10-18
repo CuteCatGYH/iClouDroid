@@ -34,6 +34,9 @@ android {
     }
     buildFeatures {
         compose = true
+        // P2-013: auth diagnostics are gated behind BuildConfig.DEBUG so the verbose cookie-probe
+        // lines are compiled out of release builds entirely.
+        buildConfig = true
     }
 }
 
@@ -67,6 +70,7 @@ dependencies {
 
     // Coil
     implementation(libs.coil.compose)
+    implementation(libs.coil.gif)
 
     // Media3
     implementation(libs.androidx.media3.exoplayer)

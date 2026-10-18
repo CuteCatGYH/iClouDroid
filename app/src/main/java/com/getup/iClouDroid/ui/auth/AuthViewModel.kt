@@ -17,6 +17,15 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
 sealed interface AuthUiState {
+    /**
+     * Cold-start placeholder while the persisted session is being read (P2-013).
+     *
+     * This state exists purely to keep [AuthScreen] - and therefore [ICloudWebView] - out of the
+     * composition during restoration. Rendering `NotLoggedIn` first would build a WebView (tens of
+     * MB of native chromium plus a renderer process) only to tear it down a moment later, which cost
+     * ~1.5s of blocked main thread on a real device.
+     */
+    data object Checking : AuthUiState
     data class NotLoggedIn(val isChinaMainland: Boolean = true) : AuthUiState
     data class Authenticating(val message: String) : AuthUiState
     data class LoggedIn(
@@ -32,7 +41,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
 
     private val sessionManager = SessionManager(application)
 
-    private val _uiState = MutableStateFlow<AuthUiState>(AuthUiState.NotLoggedIn())
+    private val _uiState = MutableStateFlow<AuthUiState>(AuthUiState.Checking)
     val uiState: StateFlow<AuthUiState> = _uiState.asStateFlow()
 
     /** Latest non-fatal cookie probe, surfaced in the diagnostic panel before full success. */
@@ -50,32 +59,70 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Restores the persisted session on cold start (P2-013).
+     *
+     * Everything that touches EncryptedSharedPreferences, the cookie string or the diagnostics
+     * logger runs off the main thread. `_uiState` starts as [AuthUiState.Checking] and only ever
+     * settles into [AuthUiState.NotLoggedIn] once we actually know there is no session - so the
+     * login WebView is never built speculatively.
+     */
     suspend fun checkExistingSession() {
-        val isLoggedIn = withContext(Dispatchers.IO) { sessionManager.isLoggedIn() }
-        if (isLoggedIn) {
-            val cookieStr = withContext(Dispatchers.IO) { sessionManager.getCookieString() ?: "" }
-            val isChina = withContext(Dispatchers.IO) { sessionManager.isChinaMainland() }
-            val savedDsid = withContext(Dispatchers.IO) { sessionManager.getDsid() ?: "" }
-            val savedCkUrl = withContext(Dispatchers.IO) { sessionManager.getCkDatabaseUrl() ?: "" }
-
-            if (savedDsid.isNotBlank() && savedCkUrl.isNotBlank()) {
-                val validation = CookieValidationResult.validate(cookieStr)
-                validation.logToLogcat("restored-from-storage")
-                _uiState.value = AuthUiState.LoggedIn(
-                    dsid = savedDsid,
-                    ckDatabaseUrl = savedCkUrl,
-                    isChinaMainland = isChina,
-                    hasHsaTrust = validation.hasHsaTrust
-                )
+        // One hop to IO: reads the five prefs values AND runs the cookie probe, instead of five
+        // separate withContext(IO) round-trips that each re-acquire the keystore-backed store.
+        val snapshot = withContext(Dispatchers.IO) {
+            val cookieStr = if (sessionManager.isLoggedIn()) {
+                sessionManager.getCookieString() ?: ""
             } else {
-                // Initialize session via Go core
-                initGoSession(cookieStr, isChina, CookieValidationResult.validate(cookieStr).hasHsaTrust)
+                ""
             }
+            SessionSnapshot(
+                isLoggedIn = cookieStr.isNotBlank(),
+                cookieStr = cookieStr,
+                isChina = sessionManager.isChinaMainland(),
+                dsid = sessionManager.getDsid() ?: "",
+                ckUrl = sessionManager.getCkDatabaseUrl() ?: "",
+                // Parsing + logging a 2.8KB cookie string is pure CPU/IO work; keep it off main.
+                validation = if (cookieStr.isNotBlank()) {
+                    CookieValidationResult.validate(cookieStr).also {
+                        it.logToLogcat("restored-from-storage")
+                    }
+                } else null
+            )
+        }
+
+        if (!snapshot.isLoggedIn) {
+            _uiState.value = AuthUiState.NotLoggedIn(snapshot.isChina)
+            return
+        }
+
+        val validation = snapshot.validation
+            ?: CookieValidationResult.validate(snapshot.cookieStr)
+
+        if (snapshot.dsid.isNotBlank() && snapshot.ckUrl.isNotBlank()) {
+            // Fast path: route info is cached, so we can go straight to LoggedIn. This path must
+            // never emit NotLoggedIn, otherwise AuthScreen would flash and build a WebView.
+            _uiState.value = AuthUiState.LoggedIn(
+                dsid = snapshot.dsid,
+                ckDatabaseUrl = snapshot.ckUrl,
+                isChinaMainland = snapshot.isChina,
+                hasHsaTrust = validation.hasHsaTrust
+            )
         } else {
-            val isChina = withContext(Dispatchers.IO) { sessionManager.isChinaMainland() }
-            _uiState.value = AuthUiState.NotLoggedIn(isChina)
+            // Route info missing - needs a Go round-trip. initGoSession sets Authenticating first.
+            initGoSession(snapshot.cookieStr, snapshot.isChina, validation.hasHsaTrust)
         }
     }
+
+    /** Immutable holder for one IO round-trip worth of session state. */
+    private data class SessionSnapshot(
+        val isLoggedIn: Boolean,
+        val cookieStr: String,
+        val isChina: Boolean,
+        val dsid: String,
+        val ckUrl: String,
+        val validation: CookieValidationResult?
+    )
 
     fun setRegion(isChinaMainland: Boolean) {
         sessionManager.setChinaMainland(isChinaMainland)

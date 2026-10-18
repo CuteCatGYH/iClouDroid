@@ -68,6 +68,7 @@ import coil.compose.SubcomposeAsyncImage
 import coil.request.ImageRequest
 import com.getup.iClouDroid.data.coil.ICloudImageLoaderFactory
 import com.getup.iClouDroid.data.coil.ICloudImageModel
+import com.getup.iClouDroid.data.coil.ImageLoadFailure
 import com.getup.iClouDroid.data.db.PhotoAssetEntity
 import com.getup.iClouDroid.data.repository.PhotoRepository
 import kotlinx.coroutines.launch
@@ -230,6 +231,7 @@ private fun ImageDetailView(
     var reloadToken by remember(photo.id) { mutableIntStateOf(0) }
     var retryCount by remember(photo.id) { mutableIntStateOf(0) }
     var loadFailed by remember(photo.id) { mutableStateOf(false) }
+    var isUrlIssue by remember(photo.id) { mutableStateOf(false) }
 
     val model = remember(photo.id, reloadToken) {
         ICloudImageModel.fromEntity(photo, ICloudImageModel.Quality.ORIGINAL)
@@ -238,17 +240,34 @@ private fun ImageDetailView(
     SubcomposeAsyncImage(
         model = ImageRequest.Builder(context)
             .data(model)
+            // P2-010: bound the decode to a sane resolution. Without this Coil decodes the full
+            // original, which is both memory-hungry and the path that used to fail on HDR
+            // gain-map HEICs. ImageDecoder still handles the gain map; this just caps the size.
+            .size(2048)
             .crossfade(true)
             .build(),
         imageLoader = imageLoader,
         contentDescription = photo.filename,
         contentScale = ContentScale.Fit,
         onError = {
-            if (retryCount < MAX_IMAGE_RETRY) {
+            val throwable = it.result.throwable
+            // P2-011: distinguish "the signed URL is dead" from "the bytes would not decode".
+            // Only the former is fixed by re-minting; the latter (e.g. an odd HEIC variant) would
+            // just burn a /records/lookup and still fail.
+            val httpCode = ImageLoadFailure.httpCodeOf(throwable)
+            isUrlIssue = ImageLoadFailure.isExpiredUrl(throwable)
+
+            if (isUrlIssue && retryCount < MAX_IMAGE_RETRY) {
                 retryCount++
-                Log.i(TAG, "image load failed, refreshing url master=${photo.masterId}, retry=$retryCount")
+                Log.i(
+                    TAG,
+                    "image url expired (HTTP $httpCode), re-minting master=${photo.masterId}, " +
+                        "retry=$retryCount"
+                )
                 scope.launch {
-                    val refreshed = repository.refreshUrlsForMaster(photo.masterId)
+                    // force = true: a deliberate single-asset action must not be vetoed by the
+                    // grid-thumbnail dedup window (P2-011).
+                    val refreshed = repository.refreshUrlsForMaster(photo.masterId, force = true)
                     if (refreshed.isSuccess) {
                         reloadToken++
                     } else {
@@ -256,6 +275,13 @@ private fun ImageDetailView(
                     }
                 }
             } else {
+                if (!isUrlIssue) {
+                    Log.w(
+                        TAG,
+                        "image decode failed (not a url issue) master=${photo.masterId} " +
+                            "error=${throwable.message}"
+                    )
+                }
                 loadFailed = true
             }
         },
@@ -281,7 +307,11 @@ private fun ImageDetailView(
                     )
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
-                        text = if (loadFailed) "原图加载失败 (链接已失效)" else "图片加载失败",
+                        text = when {
+                            !loadFailed -> "图片加载失败"
+                            isUrlIssue -> "原图加载失败 (链接已失效)"
+                            else -> "原图无法解码 (该格式暂不支持)"
+                        },
                         color = Color.White
                     )
                 }

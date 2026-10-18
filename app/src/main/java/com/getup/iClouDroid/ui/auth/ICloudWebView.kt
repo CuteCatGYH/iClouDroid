@@ -22,6 +22,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
+import com.getup.iClouDroid.BuildConfig
 
 /** Logcat tag used for every auth / cookie diagnostic log line. */
 const val AUTH_LOG_TAG = "ICloudAuth"
@@ -72,13 +73,22 @@ data class CookieValidationResult(
             ?.trim('"')
             ?.length ?: 0
 
+    /**
+     * Emits a single summary line per probe (P2-013).
+     *
+     * The previous implementation did five `Log.i` calls plus a full cookie-name dump, and it is
+     * invoked from the WebView's page callbacks - i.e. on the main thread during cold start. The
+     * per-cookie detail is only useful while debugging, so it is dropped to `Log.d` and compiled
+     * out of release builds entirely.
+     */
     fun logToLogcat(pageUrl: String?, tag: String = AUTH_LOG_TAG) {
-        Log.i(tag, "── Cookie probe @ $pageUrl")
-        Log.i(tag, "   total=${cookieNames.size} names=[${cookieNames.joinToString(", ")}]")
-        Log.i(tag, "   ${statusLine(COOKIE_AUTH_TOKEN, hasAuthToken)}")
-        Log.i(tag, "   ${statusLine(COOKIE_HSA_TRUST, hasHsaTrust)}")
-        Log.i(tag, "   ${statusLine(COOKIE_PCS_CLOUDKIT, hasPcsCloudKit)}")
-        Log.i(tag, "   isValid=$isValid missing=${missingKeys.ifEmpty { listOf("none") }}")
+        if (!BuildConfig.DEBUG) return
+        Log.d(
+            tag,
+            "cookie probe @$pageUrl total=${cookieNames.size} " +
+                "token=$hasAuthToken hsa=$hasHsaTrust pcs=$hasPcsCloudKit " +
+                "valid=$isValid missing=${missingKeys.ifEmpty { listOf("none") }}"
+        )
     }
 
     private fun statusLine(name: String, present: Boolean): String =

@@ -75,6 +75,12 @@ fun AuthScreen(
                 .padding(innerPadding)
         ) {
             when (val state = uiState) {
+                // P2-013: never render NotLoggedInContent (and thus ICloudWebView) while the
+                // persisted session is still being read. A bare spinner costs nothing; building
+                // a WebView only to tear it down cost ~1.5s of blocked main thread on device.
+                is AuthUiState.Checking -> {
+                    CheckingContent()
+                }
                 is AuthUiState.NotLoggedIn -> {
                     NotLoggedInContent(
                         isChinaMainland = state.isChinaMainland,
@@ -103,6 +109,17 @@ fun AuthScreen(
                 }
             }
         }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CheckingContent() {
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
+    ) {
+        CircularProgressIndicator()
     }
 }
 

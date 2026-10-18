@@ -26,12 +26,14 @@
 
 | 编号 | 标题 | 优先级 | 归属 | 影响 |
 | --- | --- | --- | --- | --- |
-| [P2-010](#p2-010-heic-原图带-hdr-gain-map导致-bitmapfactory-解码失败) | HEIC 原图带 HDR gain map 导致 `BitmapFactory` 解码失败 | 🟠 P1 | Android / Coil | 部分原图打不开 |
-| [P2-011](#p2-011-详情页刷新被缩略图去重窗口误伤) | 详情页刷新被缩略图去重窗口误伤 | 🟠 P1 | Android / Repository | 详情页无法自愈 |
+| ~~[P2-010](#p2-010)~~ | ~~HEIC 原图带 HDR gain map 导致 `BitmapFactory` 解码失败~~ | 🟠 P1 | Android / Coil | ✅ 已修复（模拟器实测） |
+| ~~[P2-011](#p2-011)~~ | ~~详情页刷新被缩略图去重窗口误伤~~ | 🟠 P1 | Android / Repository | ✅ 已修复（含单测） |
 | ~~[P2-012](#p2-012)~~ | ~~`append` 指示器作为网格项导致列表跳回顶部~~ | 🔴 P0 | Android / UI | ✅ 已修复（ISS-019） |
-| [P2-013](#p2-013-冷启动主线程阻塞约-15-秒) | 冷启动主线程阻塞约 1.5 秒 | 🟠 P1 | Android / 启动 | 启动卡顿、滑动不跟手 |
+| ~~[P2-013](#p2-013)~~ | ~~冷启动主线程阻塞约 1.5 秒~~ | 🟠 P1 | Android / 启动 | ✅ 已修复 |
 | ~~[P2-014](#p2-014)~~ | ~~分页期间会话重建回归（17 秒内 4 次）~~ | 🔴 P0 | Android / Repository | ✅ 已修复（ISS-020） |
 | [P2-015](#p2-015) | Go 层缺结构化 `errorCode` / `httpStatus`（技术债） | 🟡 P2 | Go 核心层 | Kotlin 侧只能正则猜字符串 |
+| [P2-016](#p2-016-remotemediator-每次-append-必-invalidate导致深翻页跳顶) | `RemoteMediator` 每次 APPEND 必 invalidate，导致深翻页跳顶 | 🔴 P0 | Android / Paging | 已确诊；缓解态，待 UI 重构根治 |
+| [P2-017](#p2-017) | Go 层 `time.Now()` 作排序键兜底（已清理） | 🔴 P0 | Go 核心层 | ✅ 已修复 |
 
 > [!NOTE]
 > P2-001 ~ P2-009 已完成修复并在 `emulator-5554` 实机验证。
@@ -106,221 +108,149 @@
 
 ---
 
-## P2-010：HEIC 原图带 HDR gain map 导致 BitmapFactory 解码失败
+## ~~P2-010：HEIC 原图带 HDR gain map 导致 BitmapFactory 解码失败~~ ✅ 已修复
 
-**优先级**：🟠 P1（部分原图打不开）
-**归属**：`data/coil/ICloudPhotoCoil.kt`
-**发现环境**：三星 SM-F9760（Galaxy Z Fold 特别版）/ Android 实机
-**状态**：⛔ 待修复
+**状态**：代码已修复，模拟器实测通过。
 
-### 现象
+### 修复内容
 
-部分照片在详情页显示「图片加载失败」，但网格缩略图完全正常。Logcat：
-
-```
-19:50:23.285 W ICloudPhotoCoil: fail 801D818D-... quality=ORIGINAL
-    error=BitmapFactory returned a null bitmap. ...not encoded as a valid image format.
-19:50:30.178 W ICloudPhotoCoil: fail E9A6DB0B-... quality=ORIGINAL
-    error=BitmapFactory returned a null bitmap.
-```
-
-而**同一素材的缩略图每次都能成功**：
-
-```
-19:48:39.451 D ICloudPhotoCoil: ok 801D818D-... quality=THUMB
-19:49:04.191 D ICloudPhotoCoil: ok 801D818D-... quality=THUMB
-```
-
-### 排查过程（已排除的假设）
-
-| 假设 | 验证方法 | 结论 |
-| --- | --- | --- |
-| URL 过期 / 403/410 | 错误信息 | ❌ 不是 HTTP 错误，是解码失败 |
-| OOM（大图解码内存不足） | 对比尺寸：12MP 成功、5MP 失败 | ❌ 与尺寸无关 |
-| `${f}` 占位符未替换 | 查库：780 条全部含占位符，成功的也含 | ❌ 已正确替换 |
-| 数据不完整 / 错误页 | `curl` 下载实测 | ❌ `HTTP=200 size=4049893 type=image/heic`，数据完整 |
-| HEIC 格式不支持 | `file` 识别两者 | ❌ 两者均为 `ISO Media, HEIF Image HEVC` |
-
-### 真正的差异：`ftyp` 的 compatible brands
-
-```
-❌ 失败 IMG_1338.HEIC（5MP / 4.05MB）
-   0000 0020 66747970 68656963 ... 6d696631 4d694845 6d696166 68656963
-                ftyp     heic        mif1     MiHE     miaf     heic
-
-✅ 成功 IMG_2049.HEIC（12MP / 2.18MB）
-   0000 0024 66747970 68656963 ... 6d696631 4d695072 6d696166 4d694842 68656963
-                ftyp     heic        mif1     MiPr     miaf     MiHB     heic
-```
-
-**失败样本包含 `MiHE` brand，成功样本是 `MiPr` + `MiHB`。**
-
-- `MiHE` = 带 **HDR gain map / 多图容器**的 HEIF
-- `MiHB` = 普通 HEVC 主图
-
-三星的 HEVC 解码器路径在遇到 gain map 辅助图时会直接失败，`BitmapFactory` 返回 null。
-
-### 为什么缩略图不受影响
-
-iCloud 下发的 `resJPEGThumbRes` 是 **JPEG**（服务端已转码，剥离了 gain map），所以缩略图永远正常；只有 `resOriginalRes` 的原生 HEIC 才带这个 variant。
-
-### 修复方案
-
-#### 方案 A（推荐）：改用系统 HEIF 解码器 + 限制采样尺寸
+**1. 加载器改用 `ImageDecoderDecoder`**
 
 ```kotlin
-// ✓ 修复后：ICloudImageLoaderFactory
-import coil.decode.ImageDecoderDecoder
-
-object ICloudImageLoaderFactory {
-    fun get(context: Context): ImageLoader {
-        return INSTANCE ?: synchronized(this) {
-            val repo = PhotoRepository.getInstance(context)
-            val loader = ImageLoader.Builder(context)
-                .components {
-                    // 关键：用系统 ImageDecoder（HEIF gain map 支持完善）
-                    // 替代默认的 BitmapFactory 路径
-                    add(ImageDecoderDecoder.Factory())
-                    add(ICloudPhotoKeyer())
-                    add(ICloudPhotoInterceptor(repo))
-                }
-                .crossfade(true)
-                .build()
-            INSTANCE = loader
-            loader
-        }
-    }
+// ICloudPhotoCoil.kt → ICloudImageLoaderFactory
+.components {
+    add(ImageDecoderDecoder.Factory())   // 关键：系统 ImageDecoder，支持 HEIF gain map
+    add(ICloudPhotoKeyer())
+    add(ICloudPhotoInterceptor(repo, SessionManager(context.applicationContext)))
 }
 ```
 
-同时把 ORIGINAL 请求的 `size` 限定为屏幕可用尺寸，避免解码全分辨率：
+`ImageDecoder`（API 28+）能正确处理带 `MiHE` brand 的 HDR gain map HEIF，
+而 Coil 默认的 `BitmapFactory` 路径会返回 null bitmap。
+
+> [!NOTE]
+> 依赖变更：`ImageDecoderDecoder` 在 Coil 2.7 里**不在 `coil-base`**，
+> 而在 `io.coil-kt:coil-gif` 模块中。已在 `libs.versions.toml` 添加 `coil-gif`
+> 并在 `app/build.gradle.kts` 中引入。
+
+**2. 详情页限制解码尺寸**
 
 ```kotlin
 // PhotoDetailViewer.kt
 ImageRequest.Builder(context)
     .data(model)
-    .size(2048)        // 不传则按原图完整解码，内存与兼容性风险都高
+    .size(2048)      // 不传则按原图完整解码，内存与兼容性风险都高
     .build()
 ```
 
-#### 方案 B（兜底）：解码失败时降级到 MEDIUM
+### 关于“降级到 MEDIUM”
+
+原计划同时实施方案 B（解码失败降级 MEDIUM）作为兜底。实际上 **`pickUrl` 已有降级链**：
 
 ```kotlin
-// ICloudPhotoInterceptor 中
-when (result) {
-    is ImageResult.Error -> {
-        if (data.quality == ICloudImageModel.Quality.ORIGINAL && !hasDegraded) {
-            Log.w(TAG, "ORIGINAL decode failed for ${data.recordName}, degrade to MEDIUM")
-            // 用 medUrl 重试，至少让用户看到内容
-            return chain.proceed(request.newBuilder().data(medUrl).build())
-        }
-    }
-}
+Quality.ORIGINAL -> entity.originalUrl ?: entity.medUrl ?: entity.thumbUrl
 ```
 
-> [!TIP]
-> **两个方案建议都上**：方案 A 治本（能真正解出原图），方案 B 兜底（A 也挡不住时至少能给中图）。
+且方案 A 已从根源解决 gain map 问题，故未额外加拦截器降级逻辑，避免引入新的歧义。
 
-#### 方案 C（终极方案）：Go 侧转码
+### 验证结果
 
-在 Go 层用 `bimg` / `libheif` 把 HEIC 转成 JPEG 后返回。彻底绕开客户端兼容性问题，但增加服务端/本地 CPU 开销，且需引入 CGO 依赖，**不建议现阶段做**。
+模拟器（Medium Phone API 37）实测：
 
-### 验证方法
+```
+22:46:00.813 D/ICloudPhotoCoil: load 95663D45-... quality=ORIGINAL hasUrl=true ageStale=false genStale=false
+22:46:06.933 D/ICloudPhotoCoil: ok 95663D45-... quality=ORIGINAL
+```
 
-修复后重新打开 `IMG_1338.HEIC`（master=`AUQhzkGu3AmNvxGLZVpYZieyfodv`）与 `IMG_1335.HEIC`（master=`AWqP3cETVjWRaNG7zO6IJj13uMcz`），预期：
+✓ 原图加载成功，**未出现** `BitmapFactory returned a null bitmap`。
+连续打开多张 HEIC 原图（`IMG_2115` / `IMG_2114`）均正常显示。
 
-- `ICloudPhotoCoil: ok ... quality=ORIGINAL`
-- 详情页能正常显示原图
-- 不再出现 `BitmapFactory returned a null bitmap`
+> [!NOTE]
+> 真机（三星 SM-F9760）尚未复测 —— 当时设备断开。建议后续用
+> `IMG_1338.HEIC` / `IMG_1335.HEIC`（带 `MiHE` gain map 的真实失败样本）补充验证。
 
 ---
 
-## P2-011：详情页刷新被缩略图去重窗口误伤
+## ~~P2-011：详情页刷新被缩略图去重窗口误伤~~ ✅ 已修复
 
-**优先级**：🟠 P1（详情页无法自愈）
-**归属**：`data/repository/PhotoRepository.kt` → `refreshUrlsForMaster()`
-**状态**：⛔ 待修复
+**状态**：代码已修复，新增 4 个单测（共 12 个全部通过）。
 
-### 现象
+### 修复内容（两个改进）
 
-详情页原图加载失败后尝试刷新 URL，但被去重逻辑直接拒绝：
+#### 改进 1：只在真的是 URL 失效时才刷新
 
-```
-19:50:15.328 I PhotoDetailViewer: image load failed, refreshing url master=AUQhzkGu3AmNvxGLZVpYZieyfodv, retry=1
-19:50:15.332 D PhotoRepository: refreshUrlsForMaster skipped (deduped within window) master=AUQhzkGu3AmNvxGLZVpYZieyfodv
-19:50:23.286 I PhotoDetailViewer: image load failed, refreshing url master=AUQhzkGu3AmNvxGLZVpYZieyfodv, retry=1
-19:50:23.286 D PhotoRepository: refreshUrlsForMaster skipped (deduped within window) master=AUQhzkGu3AmNvxGLZVpYZieyfodv
-```
-
-8 秒内两次请求刷新，**两次都被去重窗口拦下**，详情页永远无法自愈。
-
-### 根因
-
-P2-008 的去重窗口是**按 masterId 维度**的，但刷新实际上同时返回 thumb / med / original **三类 URL**：
+解码失败（如 HEIC gain map）不是 URL 问题，刷新 URL 毫无意义，只会白白消耗
+`/records/lookup` 并刷屏日志。现在按 HTTP 状态码分流：
 
 ```kotlin
-// 当前：仅按 masterId 去重
-private val refreshGuard = mutableMapOf<String, Long>()   // masterId -> 时间
-```
+// PhotoDetailViewer.kt → SubcomposeAsyncImage.onError
+val httpCode = (throwable as? coil.network.HttpException)?.response?.code
+isUrlIssue = httpCode == 403 || httpCode == 410
 
-场景：
-1. 缩略图先失败 → 触发刷新 → 窗口开启，三类 URL 同时更新
-2. 用户点入详情页 → 原图仍失败（下面 P2-010 的 HEIC 解码问题）
-3. 详情页请求刷新 → 被同一 masterId 的窗口拦住
-
-更关键的是：**P2-010 的解码失败不是 URL 问题**，刷新 URL 也没用，但会不断撞窗口，形成无效请求 + 无效日志。
-
-### 修复方案
-
-#### 改进 1：只在 URL 真的失效时才刷新
-
-解码失败（`BitmapFactory null`）不应该触发 URL 刷新：
-
-```kotlin
-// PhotoDetailViewer.kt
-onError = {
-    val throwable = it.result.throwable
-    val code = (throwable as? HttpException)?.code()
-    val isUrlIssue = code == 403 || code == 410
-
-    if (isUrlIssue && retryCount < MAX_RETRY) {
-        // 只有真·URL 失效才刷新
-        refreshAndRetry()
-    } else if (!isUrlIssue) {
-        // 解码失败 → 降级策略，不刷新 URL
-        Log.w(TAG, "decode failure (not url issue), degrade to MEDIUM")
-        degradeQuality()
-    }
+if (isUrlIssue && retryCount < MAX_IMAGE_RETRY) {
+    // 只有真·URL 失效才刷新
+} else {
+    // 解码失败 —— 不刷新，直接给出区分性文案
+    Log.w(TAG, "image decode failed (not a url issue) master=... error=...")
+    loadFailed = true
 }
 ```
 
-#### 改进 2：去重窗口按「masterId + 品质」维度
+错误文案也相应区分：
+
+| 情况 | 文案 |
+| --- | --- |
+| 链接失效且重试耗尽 | 原图加载失败 (链接已失效) |
+| 解码失败 | 原图无法解码 (该格式暂不支持) |
+
+#### 改进 2：提供强制刷新通道
 
 ```kotlin
-// ✓ 修复后
-private val refreshGuard = mutableMapOf<String, Long>()   // "masterId:THUMB" -> 时间
-
-private suspend fun refreshOnce(masterId: String, quality: String): RefreshedUrls? {
-    val key = "$masterId:$quality"
-    guardLock.withLock {
-        val last = refreshGuard[key] ?: 0L
-        if (System.currentTimeMillis() - last < REFRESH_WINDOW_MS) return null
-        refreshGuard[key] = System.currentTimeMillis()
-    }
-    return repository.refreshUrlsForMaster(masterId).getOrNull()
-}
+suspend fun refreshUrlsForMaster(
+    masterId: String,
+    force: Boolean = false     // 新增
+): Result<RefreshedUrls>
 ```
 
-#### 改进 3：提供强制刷新通道
+`force = true` **仅跳过去重层 2**（时间窗口），层 1（in-flight 合并）依然生效，
+所以不会因为强制而制造并发风暴。
 
-详情页（单次用户操作）应能绕过去重：
+详情页调用点：
 
 ```kotlin
-suspend fun refreshUrlsForMaster(masterId: String, force: Boolean = false): Result<RefreshedUrls>
+val refreshed = repository.refreshUrlsForMaster(photo.masterId, force = true)
 ```
 
 > [!IMPORTANT]
-> 修好 P2-010 后，这类「解码失败 → 误求刷新」的调用会大幅减少，但去重维度不对的问题仍需修正，否则未来仍会被误伤。
+> 为何只绕过层 2：详情页是**单次用户操作**，不可能形成突发；
+> 但若被网格缩略图 30 秒前的刷新窗口否决，就会出现“安全措施反而导致永久修不好”的尴尬。
+> 层 1 保留则保证即使真的并发也不会重复请求。
+
+### 为何不做“去重窗口按 masterId + 品质”
+
+`list.md` 原方案提议把去重键改为 `"masterId:THUMB"`。但 `/records/lookup`
+**一次就返回全部三种品质的 URL**（thumb / med / original），按品质拆分键会导致
+同一 master 发出多次完全重复的请求，适得其反。改用 `force` 参数更精准。
+
+### 验证
+
+**单测（新增 `ImageLoadFailureTest`，4 个）**：
+
+| 用例 | 断言 |
+| --- | --- |
+| HTTP 410 / 403 | `isExpiredUrl = true` |
+| HTTP 404 / 500 / 200 | `isExpiredUrl = false` |
+| `IOException`（解码失败）/ `null` | `isExpiredUrl = false` |
+| `httpCodeOf` | 仅 HTTP 异常返回码 |
+
+`testDebugUnitTest`：**12 passed, 0 failed**。
+
+**模拟器实测**：连续打开多张原图，均为 `ok ... quality=ORIGINAL`，
+无多余 `/records/lookup`，无 `deduped within window` 拦截。
+
+> [!NOTE]
+> 真正的“URL 过期 → 强制刷新→ 成功”链路需等服务端签名自然过期才能完整复现，
+> 目前靠单测 + 代码审阅保证逻辑正确。
 
 ---
 
@@ -522,6 +452,88 @@ class IClouDroidApp : Application() {
 
 ---
 
+## ~~P2-013：冷启动主线程阻塞约 1.5 秒~~ ✅ 已修复
+
+### 实际改动（三处）
+
+**1. `AuthUiState` 新增 `Checking` 初始态**（最关键）
+
+```kotlin
+sealed interface AuthUiState {
+    data object Checking : AuthUiState   // 新增
+    data class NotLoggedIn(...) : AuthUiState
+    ...
+}
+
+private val _uiState = MutableStateFlow<AuthUiState>(AuthUiState.Checking)   // 原为 NotLoggedIn()
+```
+
+`Checking` 分支在 `AuthScreen` 与 `MainActivity` 里**都只渲染一个 spinner**，
+**绝不渲染 `AuthScreen` / `NotLoggedInContent`** —— 那会构造 `ICloudWebView`，
+加载几十 MB 的 `libwebviewchromium.so` 并启动渲染进程。
+
+**2. `checkExistingSession()` 合并为单次 IO 跳转**
+
+原实现有 5 次独立的 `withContext(Dispatchers.IO)`，每次都重新访问 keystore 支撑的
+`EncryptedSharedPreferences`。现在合并为一次，并把 `CookieValidationResult.validate()`
+与 `logToLogcat()` 一起搬进 IO：
+
+```kotlin
+val snapshot = withContext(Dispatchers.IO) {
+    SessionSnapshot(
+        isLoggedIn = ..., cookieStr = ..., isChina = ...,
+        dsid = ..., ckUrl = ...,
+        validation = ...also { it.logToLogcat("restored-from-storage") }
+    )
+}
+```
+
+**3. `logToLogcat()` 降为单行 `Log.d` + `BuildConfig.DEBUG` 门控**
+
+原来每次探针 5 条 `Log.i` + 完整 cookie 名列表；现在一行摘要，且 release 构建直接编译掉：
+
+```kotlin
+if (!BuildConfig.DEBUG) return
+Log.d(tag, "cookie probe @$pageUrl total=${cookieNames.size} token=$hasAuthToken ...")
+```
+
+> [!NOTE]
+> 为此在 `app/build.gradle.kts` 开启了 `buildFeatures { buildConfig = true }`。
+
+### 验证结果（三星 SM-F9760 真机，`am force-stop` 后冷启动）
+
+| 指标 | 修复前 | 修复后 |
+| --- | --- | --- |
+| `Choreographer: Skipped` | **197 frames**（~3.3 秒） | **37 frames**（~0.6 秒） |
+| `checkCookies source=onPageStarted` | 出现（WebView 被提前创建） | **完全消失** |
+| `WebViewFactory: Loading com.google.android.webview` | 出现 | **未出现** |
+| Cookie 探针日志 | 5 行 `Log.i` 全量打印 | **1 行 `Log.d` 摘要** |
+| 会话恢复 | 正常 | 正常（静默恢复 2490 项） |
+
+关键日志（修复后，全程无 WebView 初始化）：
+
+```
+21:18:23.346 D/ICloudAuth: cookie probe @restored-from-storage total=18 token=true hsa=true pcs=true valid=true missing=[none]
+21:18:23.578 I/PhotoRepository: Rebuilding Go core session (force=false)...
+21:18:23.826 I/Choreographer: Skipped 37 frames!
+```
+
+### 剩余 37 帧的来源（不属于本问题）
+
+日志显示这批跳帧发生在首屏缩略图批量加载时：
+
+```
+21:18:23.723 D/ICloudPhotoCoil: load ... quality=THUMB hasUrl=true ageStale=false genStale=true
+…（同时多条）
+21:18:23.826 I/Choreographer: Skipped 37 frames!
+```
+
+`genStale=true` 说明会话重建后全部 URL 失效，首屏数十格同时触发刷新。
+这是**首屏渲染成本**，不是冷启动阻塞，且已从 3.3 秒降到 0.6 秒。
+若需进一步优化，可在会话重建后预热首屏 URL（`refreshUrlsForMasters` 批量接口已就绪但未消费）。
+
+---
+
 ## ~~P2-014：分页期间会话重建回归（17 秒内 4 次）~~ ✅ 已修复
 
 > 已归档至 [CHANGELOG_ISSUES.md → ISS-020](CHANGELOG_ISSUES.md#iss-020-continuationmarker-失效后仍被重放引发-401--重建死循环)。
@@ -543,111 +555,160 @@ class IClouDroidApp : Application() {
 
 ---
 
-## P2-016：孤儿 master 用 `time.Now()` 当 `assetDate` 导致滑到底跳顶 🔴 真凶
+## P2-016：`RemoteMediator` 每次 APPEND 必 invalidate，导致深翻页跳顶
 
-**优先级**：🔴 P0（这是真正导致跳顶的根因）
-**归属**：`go-core/photos.go` → `parseRecords()`
-**发现环境**：三星 SM-F9760 真机，修复 P2-012/014 后仍钉钉跳顶
-**状态**：⛔ 待修复
+**优先级**：🔴 P0（已确诊；但属 Paging 3 架构性行为，待 UI 重构时一并解决）
+**归属**：`data/repository/PhotoRepository.kt` → `PagingConfig`；`PhotoRemoteMediator`
+**发现环境**：三星 SM-F9760 真机
+**状态**：⚠️ 根治方案暂缓（等 UI 重构）；当前为「推后悬崖」的缓解态
 
-### 现象
+### 最终结论（经四轮排查 + `GridDiag` 实测确认）
 
-真机日志揭示了决定性模式 —— **26 秒内连演 13 次 APPEND，每次 `limit=60` 却只回 30 条**：
+**根因不是数据层，是 Paging 3 的 `RemoteMediator` 机制本身。**
+
+因果链条：
+
+1. 每次 APPEND，`PhotoRemoteMediator.load()` 返回 `MediatorResult.Success`
+2. Paging 3 收到 `Success` 后 **无条件 invalidate `PagingSource`**（官方设计，无法绕过）
+3. invalidate 后重新加载，**重载窗口长度 = `initialLoadSize`**
+4. 用户当前位置超出该窗口 → `firstVisibleItemIndex` 被 clamp 到窗口内 → **视觉跳顶**
+
+### 关键实测证据（`GridDiag` 日志）
+
+在 `LazyGridState` 上挂 `snapshotFlow` 直接观测，得到了铁证：
 
 ```
-20:34:53.580 D PhotoRepository: Fetching next photo page (limit=60)
-20:34:54.295 D PhotoRepository: Next page returned: 30 photos, hasMore=true
-20:34:55.942 D PhotoRepository: Fetching next photo page (limit=60)
-20:34:56.676 D PhotoRepository: Next page returned: 30 photos, hasMore=true
-…（连演 13 次，持续 26 秒）
+20:55:35.298 index=1344 itemCount=1827 appending=true    ← APPEND 进行中
+20:55:35.466 index=1344 itemCount=1200 appending=false   ← 塌到 initialLoadSize=1200
+20:55:35.491 index=1168 itemCount=1200                   ← index 被 clamp 回 1168
+20:55:35.548 index=1164 itemCount=1260                   ← 一页页涨回来
+20:55:35.579 index=1164 itemCount=1320
+…
+20:55:36.629 index=1164 itemCount=1740                   ← index 卡在 1164 不动
 ```
 
-这种“饥饿循环”会让 `LazyPagingItems` 索引表反复重建 —— 这才是真机跳顶的直接原因。
+**塌陷点恒定等于 `initialLoadSize`**，两组对照完全验证：
 
-### 根因
-
-`go-core/photos.go` 的 `parseRecords()` 里，对于**没有匹配到 CPLAsset 的孤儿 master**，
-代码把 `time.Now()` 当作排序键：
-
-```go
-// ❌ 错的
-for mID, m := range masters {
-    if !matchedMasters[mID] {
-        photos = append(photos, PhotoItem{
-            AssetDate: time.Now().UnixMilli(),   // ← 每次请求都是不同值！
-            AddedDate: time.Now().UnixMilli(),
-            ...
-        })
-    }
-}
-```
-
-**灾难性后果**：同一个 master 每次分页被重新入库时，`assetDate` 都变成当前时间，
-于是它**永远排在列表最前面**，且每次分页都刷新一次。表现为：
-
-1. 这些孤儿 master 被反复插入第一页位置 → 用户滑到底时它们“凭空出现”在顶部
-2. 每次 APPEND 只能带入 30 条有效新数据（其余 30 条是被重置的孤儿）
-3. Room invalidation → `PagingSource.invalidate()` → 索引表重建 → **视觉跳顶**
+| `initialLoadSize` | 实测塌陷到的 `itemCount` |
+| --- | --- |
+| 60 | **60**（用户从 index 305 掉回 16） |
+| 360 | **360**（用户从 index 564 掉回 324） |
+| 1200 | **1200**（用户从 index 1344 掉回 1164） |
 
 > [!IMPORTANT]
-> 这也解释了为何 P2-012（footer）和 P2-014（marker）都修了但跳顶依旧：
-> 那两项都是真问题，但**不是跳顶的主因**。主因在数据层。
+> 这也解释了用户描述的「跳回位置随滑深同步下移」：
+> 滑得越深，离 `initialLoadSize` 越远，被 clamp 得越多。
 
-### 修复方案
+### 为什么调参不能根治
 
-#### 方案 A（推荐）：孤儿 master 不入库 / 用确定性时间戳
+调大 `initialLoadSize` 只是**把悬崖往后推**，并未消除。图库有多少张，
+就总有一个深度会撞上悬崖。这是结构性问题，不是参数问题。
 
-两种写法，优先第一种：
+### 已经做的缓解（保留）
 
-**A1 — 直接不返回孤儿 master**（最干净）：
-一个没有 `CPLAsset` 的孤立 `CPLMaster` 本来就不是用户可见的照片。
-不带 `assetDate` 就无法正确排序，强行给个“当前时间”只会污染列表。
-直接不加入 `photos` 即可：
-
-```go
-// 直接删掉整个 "For any standalone masters that didn't have an asset" 循环
-```
-
-> [!WARNING]
-> 需先确认这个循环当初的存在理由。若确实依赖它处理某些真实场景，
-> 则用 A2。
-
-**A2 — 用确定性时间戳**：
-如果必须保留，至少不能用 `time.Now()`。改用 master 自身的稳定信息（如 `recordName`
-的哈希派生的固定时间，或直接用 0 并在 Kotlin 侧沉底）：
-
-```go
-AssetDate: 0,   // 无真实拍摄时间，由 Kotlin 侧 ORDER BY 自然沉底
-```
-
-配合 Kotlin 侧排序 `ORDER BY assetDate DESC`，`0` 会稳定排在最后，且**永不变动**。
-
-#### 方案 B（配套）：Kotlin 侧防御
-
-即使 Go 侧修好，也建议在 `parsePhotoItems()` 里加一道断言：
+`PagingConfig` 当前配置：
 
 ```kotlin
-if (assetDate <= 0) {
-    Log.w(TAG, "Dropping photo with invalid assetDate: id=$id")
-    continue
+pageSize = 60,
+prefetchDistance = PREFETCH_DISTANCE,   // 60 * 3
+initialLoadSize = INITIAL_LOAD_SIZE     // 60 * 20 = 1200
+```
+
+- 真机能从「滑到 240 就跳」改善到「滑到 2400 才跳」
+- `prefetchDistance` 曾试过 `60*8`，导致 APPEND 并发过猛，
+  CloudKit 返回 `context deadline exceeded`，已回落到 `60*3`
+
+### 为什么不建议现在重写
+
+用户已明确：**最终版本会换成 Google Photos 风格的 UI**。
+而分组式 UI 的滚动锚点是「日期 section + 组内偏移」，**不是全局整数 index**，
+天然的不会以同样形式遭遇 index 塌陷。
+
+因此现在为旧 UI 做脱离 Paging 3 的重写，属于**投入会被丢弃、风险却真实存在**：
+脱离 Paging 3 意味着自建 prefetch / 错误重试 / 加载状态 / 并发控制，
+而这些现在是免费获得的。
+
+### 待办（等 UI 重构时一并处理）
+
+- [ ] 采用日期分组 UI 时，滚动锚点改为 `DateSectionKey + offset`
+- [ ] 评估是否保留 Paging 3；若保留，验证分组后 `initialLoadSize` 是否仍需调大
+- [ ] 若届时仍用 `LazyGridState`，改用 `firstVisibleItemKey` 做锚定而非 index
+
+### 已排除的假设（避免后人重复踩坑）
+
+| 曾经的判断 | 为何不成立 |
+| --- | --- |
+| footer 作为网格项使 itemCount ±1 | 真问题，但是次要因素，修完跳顶依旧 |
+| `continuationMarker` 失效被重放 | 真问题（ISS-020），但修完跳顶依旧 |
+| 孤儿 master 用 `time.Now()` 污染排序 | 真问题，已修，但不是跳顶主因 |
+| 排序键不稳定（`assetDate` 同秒并列） | 真问题，已加 `id` tiebreaker，但非主因 |
+
+> [!NOTE]
+> 上述四项都已修复且应当保留（见 ISS-019 / ISS-020），它们各自解决了
+> 真实的次要缺陷。跳顶的**唯一充分原因**是本文开头描述的 `RemoteMediator` invalidate。
+
+### 配套待办：`append` 错误提示不应直接吐 URL
+
+当前 `PhotosScreen.kt` 把 `appendState.error.message` 直接展示给用户，可能吐出：
+
+```
+Post "https://p203-ckdatabasews.icloud.com.cn/...?clientId=...&dsid=...":
+context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+```
+
+既难以理解，又含会话参数（违反 AGENTS.md §8.2 “绝不打印完整签名 URL”的精神）。
+应改为友好文案 + 重试按钮，详情只进 logcat。
+
+---
+
+## ~~P2-017：Go 层 `time.Now()` 作排序键兜底~~ ✅ 已修复
+
+**优先级**：🔴 P0（虽然非跳顶主因，但会造成照片位置漂移）
+**归属**：`go-core/photos.go` → `parseRecords()`
+**状态**：✅ 已修复并重新构建 AAR
+
+### 问题
+
+`go-core/photos.go` 有两处用 `time.Now()` 给缺失时间戳的记录兜底，
+而 `assetDate` 是 `ORDER BY assetDate DESC` 的排序键：
+
+```go
+// ❌ 位置 1：孤儿 master（无对应 CPLAsset）
+AssetDate: time.Now().UnixMilli(),
+AddedDate: time.Now().UnixMilli(),
+
+// ❌ 位置 2：CPLAsset 本身缺 assetDate/addedDate
+if assetDate == 0 {
+    assetDate = time.Now().UnixMilli()
 }
 ```
 
-避免将来 Go 侧再回退。
+**后果**：同一行每次分页重新入库时排序键都变，在列表中的位置持续漂移，
+且永远被顶到最前面。虽然不是跳顶主因，但是明确的错误。
 
-#### 方案 C（已做，保留）：稳定排序键
+### 修复
 
-`PhotoDao` 的 `ORDER BY assetDate DESC, id ASC` 与复合索引（P2-012 修复的一部分）仍然应该保留，
-它们是正确的防御，只是**单独不足以解决跳顶**。
+两处均改为稳定的 `0`（DESC 排序下自然沉底、永不移动）：
 
-### 验证方法
+```go
+AssetDate: 0,   // P2-016: never time.Now() — must be stable across fetches
+```
 
-修复后真机滑动，预期：
+同时移除不再使用的 `"time"` import。
 
-- `Fetching next photo page` 每次都是 `limit=60` → **返回 60 photos**
-- 不再出现 13 连发的饥饿循环
-- 滑到底不再跳顶
-- logcat 中无 `Dropping photo with invalid assetDate` 告警
+Kotlin 侧同步加防御（[PhotoRepository.parsePhotoItems](file:///Users/syh/iClouDroid/app/src/main/java/com/getup/iClouDroid/data/repository/PhotoRepository.kt)）：
+
+```kotlin
+val rawAssetDate = obj.optLong("assetDate", 0L)
+val assetDate = if (rawAssetDate > 0L) rawAssetDate else 0L   // 不再 fallback 到 now
+val addedDate = obj.optLong("addedDate", 0L).takeIf { it > 0L } ?: assetDate
+```
+
+### 验证
+
+`./scripts/build_aar.sh` 成功、`go test ./...` 通过。
+
+---
 
 ---
 

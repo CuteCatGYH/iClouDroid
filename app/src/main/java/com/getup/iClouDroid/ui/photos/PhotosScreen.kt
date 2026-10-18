@@ -1,7 +1,5 @@
 package com.getup.iClouDroid.ui.photos
 
-import android.util.Log
-
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -44,7 +42,6 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -77,23 +74,6 @@ fun PhotosScreen(
     // death, so a Paging refresh no longer throws the user back to the top of the grid.
     val gridState = rememberSaveable(saver = LazyGridState.Saver) { LazyGridState() }
     var pendingRestoreIndex by remember { mutableIntStateOf(-1) }
-
-    // P2-016 TEMP DIAGNOSTIC: record exactly what the scroll state does around each APPEND so we
-    // stop guessing at the jump-to-top mechanism. Remove once the root cause is confirmed.
-    LaunchedEffect(gridState) {
-        snapshotFlow {
-            Triple(
-                gridState.firstVisibleItemIndex,
-                lazyPagingItems.itemCount,
-                lazyPagingItems.loadState.append !is LoadState.NotLoading
-            )
-        }.collect { snapshot ->
-            val index = snapshot.first
-            val count = snapshot.second
-            val appending = snapshot.third
-            Log.d("GridDiag", "index=$index itemCount=$count appending=$appending")
-        }
-    }
 
     LaunchedEffect(gridColumns) {
         if (pendingRestoreIndex >= 0) {

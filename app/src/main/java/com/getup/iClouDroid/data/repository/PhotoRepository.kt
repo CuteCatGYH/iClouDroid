@@ -487,14 +487,26 @@ class PhotoRepository(
      *     values without any network call.
      *  3. If the whole session was just rebuilt within [REFRESH_DEDUP_WINDOW_MS], collapse the
      *     resulting thundering herd into a short randomized delay so lookups are spread out.
+     *
+     * [force] bypasses layer 2 only (P2-011). It exists for explicit, user-driven, single-asset
+     * recovery — a tap on "retry" / opening the detail viewer. Those are one-shot actions for one
+     * master, so they can never form a burst, but they *must* be able to override the window: a
+     * grid thumbnail that refreshed 30s ago would otherwise silently veto the detail page's
+     * attempt to re-mint a dead URL, leaving it permanently broken. Layer 1 still applies, so a
+     * forced call joins any genuinely concurrent refresh instead of duplicating it.
      */
-    suspend fun refreshUrlsForMaster(masterId: String): Result<RefreshedUrls> {
-        // Layer 2: recent successful refresh -> serve from DB.
-        refreshMutex.withLock {
-            val last = recentRefreshes[masterId] ?: 0L
-            if (System.currentTimeMillis() - last < REFRESH_DEDUP_WINDOW_MS) {
-                Log.d(TAG, "refreshUrlsForMaster skipped (deduped within window) master=$masterId")
-                return withContext(Dispatchers.IO) { readUrlsFromDb(masterId) }
+    suspend fun refreshUrlsForMaster(
+        masterId: String,
+        force: Boolean = false
+    ): Result<RefreshedUrls> {
+        // Layer 2: recent successful refresh -> serve from DB (unless the caller forces a re-mint).
+        if (!force) {
+            refreshMutex.withLock {
+                val last = recentRefreshes[masterId] ?: 0L
+                if (System.currentTimeMillis() - last < REFRESH_DEDUP_WINDOW_MS) {
+                    Log.d(TAG, "refreshUrlsForMaster skipped (deduped within window) master=$masterId")
+                    return withContext(Dispatchers.IO) { readUrlsFromDb(masterId) }
+                }
             }
         }
 

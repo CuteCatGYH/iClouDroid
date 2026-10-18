@@ -5,7 +5,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.collectAsState
@@ -13,6 +15,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import com.getup.iClouDroid.ui.auth.AccountInfoDialog
 import com.getup.iClouDroid.ui.auth.AuthScreen
@@ -39,6 +42,18 @@ class MainActivity : ComponentActivity() {
                     var showAccountDialog by remember { mutableStateOf(false) }
 
                     when (val state = authState) {
+                        // P2-013: 'else -> AuthScreen' used to swallow this transient state and
+                        // speculatively build the login WebView. Route it out explicitly so the
+                        // only thing on screen during restoration is a spinner.
+                        is AuthUiState.Checking -> {
+                            Box(
+                                modifier = Modifier.fillMaxSize(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                CircularProgressIndicator()
+                            }
+                        }
+
                         is AuthUiState.LoggedIn -> {
                             PhotosScreen(
                                 viewModel = photosViewModel,

@@ -3,6 +3,7 @@ package com.getup.iClouDroid.data.coil
 import android.content.Context
 import android.util.Log
 import coil.ImageLoader
+import coil.decode.ImageDecoderDecoder
 import coil.intercept.Interceptor
 import coil.key.Keyer
 import coil.request.ErrorResult
@@ -53,6 +54,25 @@ data class ICloudImageModel(
 class ICloudPhotoKeyer : Keyer<ICloudImageModel> {
     override fun key(data: ICloudImageModel, options: Options): String {
         return "icloud_${data.recordName}_${data.quality.name.lowercase()}"
+    }
+}
+
+/**
+ * Classifies why an image load failed (P2-011).
+ *
+ * Only a dead signature is fixable by re-minting the URL. A decoder failure (e.g. an exotic HEIC
+ * variant) returns the same broken bytes no matter how many fresh URLs we ask for, so treating it
+ * as a URL problem just burns `/records/lookup` calls and floods the log.
+ */
+internal object ImageLoadFailure {
+    /** HTTP status code carried by [throwable], or null when it was not an HTTP failure. */
+    fun httpCodeOf(throwable: Throwable?): Int? =
+        (throwable as? coil.network.HttpException)?.response?.code
+
+    /** True when the failure means "this signed URL is no longer accepted by the CDN". */
+    fun isExpiredUrl(throwable: Throwable?): Boolean {
+        val code = httpCodeOf(throwable) ?: return false
+        return code == 403 || code == 410
     }
 }
 
@@ -180,6 +200,13 @@ object ICloudImageLoaderFactory {
             val repo = PhotoRepository.getInstance(context)
             val loader = ImageLoader.Builder(context)
                 .components {
+                    // P2-010: iCloud hands back the native HEIC for `resOriginalRes`, and some of
+                    // those carry an HDR gain map (compatible brand `MiHE` rather than `MiPr`).
+                    // Coil's default BitmapFactory decoder returns a null bitmap for them, so
+                    // originals showed "image failed to load" while the JPEG thumbnails (already
+                    // transcoded server-side) were fine.
+                    // ImageDecoder handles gain maps and multi-image HEIF correctly.
+                    add(ImageDecoderDecoder.Factory())
                     add(ICloudPhotoKeyer())
                     add(ICloudPhotoInterceptor(repo, SessionManager(context.applicationContext)))
                 }

@@ -334,8 +334,11 @@ app/src/main/java/com/getup/iClouDroid/
 
 ### Phase 3 建议偿还的技术债
 
-- Go 层返回结构化 `errorCode` / `httpStatus` 字段，取代 Kotlin 侧正则兜底
-- Room 正式 Migration（目前 v2 使用 `fallbackToDestructiveMigration()`）
+- Go 层返回结构化 `errorCode` / `httpStatus` 字段，取代 Kotlin 侧正则兜底（P2-015）
+- Room 正式 Migration（目前 v3 仍使用 `fallbackToDestructiveMigration()`）
 - `refreshUrlsForMasters()` 批量刷新入口目前已就绪但未被消费，可在列表预加载时预热
+- **深翻页跳顶（P2-016）**：`RemoteMediator` 每次 APPEND 必 invalidate，属 Paging 3 架构性
+  行为。当前为缓解态（`initialLoadSize = 1200`，可滑到 ~2400 项）。根治方案：改用日期分组
+  UI（滚动锚点为「日期 section + 组内偏移」而非全局 index）时一并替换
 
 ---

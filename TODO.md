@@ -77,6 +77,28 @@
 - [x] **🟠 P2 — 视频详情页时长显示 00:00** ✅（已在 `VideoPlayerView` 添加 `Player.Listener` 错误监听并向用户展示清晰引导）
 - [x] **🟡 P3 — 分页日志刷新刷屏** ✅（已降级无害频繁日志至 `Log.d`）
 
+#### 第三轮真机联调收尾（三星 SM-F9760）
+
+- [x] **`append` 指示器作为网格项导致跳顶** ✅（footer 移出网格 + 网格常驻组合树，详见 [ISS-019](CHANGELOG_ISSUES.md#iss-019-append-指示器作为网格项导致列表跳回顶部)）
+- [x] **分页期间会话重建回归（17 秒 4 次）** ✅（`continuationMarker` 失效路径作废，详见 [ISS-020](CHANGELOG_ISSUES.md#iss-020-continuationmarker-失效后仍被重放引发-401--重建死循环)）
+- [x] **冷启动主线程阻塞 ~3.3 秒** ✅（`AuthUiState.Checking` 初始态避免 WebView 提前构造，详见 [ISS-022](CHANGELOG_ISSUES.md#iss-022-冷启动时-login-webview-被提前构造阻塞主线程-33-秒)）
+- [x] **HDR gain map HEIC 解码失败 + 解码失败误触发刷新** ✅（`ImageDecoderDecoder` + `force` 刷新通道，详见 [ISS-023](CHANGELOG_ISSUES.md#iss-023-hdr-gain-map-heic-解码失败--解码失败误触发-url-刷新)）
+- [x] **Go 层 `time.Now()` 作排序键兜底** ✅（改为稳定 `0`，避免照片位置漂移）
+- [x] **排序键不稳定** ✅（`ORDER BY assetDate DESC, id ASC` + 复合索引）
+- [ ] **⚠️ 深翻页跳顶（P2-016）** — `RemoteMediator` 每次 APPEND 必 invalidate，属 Paging 3 架构性行为。当前为缓解态（`initialLoadSize=1200`），**根治待 UI 重构时一并解决**（详见 [ISS-021](CHANGELOG_ISSUES.md#iss-021-remotemediator-每次-append-必-invalidate导致深翻页跳顶)）
+
+**Phase 2 收尾验证指标**（模拟器 Medium Phone API 37）：
+
+| 指标 | 结果 |
+| --- | --- |
+| 冷启动会话重建 | **0 次** |
+| `auth error` | **0 次** |
+| WebView 冷启动初始化 | **0 次** |
+| `Choreographer: Skipped` | **无** |
+| 滚动中 `itemCount` 塌陷 | **0 次**（index 平滑至 336，itemCount 稳定 1200） |
+| `go test ./...` | **ok** |
+| `testDebugUnitTest` | **12 passed, 0 failed** |
+
 ### Phase 3: Android 本地相册自动备份 (增量上传)
 
 - [ ] **本地相册监听与云端去重**
