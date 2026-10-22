@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -34,14 +35,20 @@ type Session struct {
 	Domain          string
 
 	// Raw and parsed cookies
-	CookieStr       string
-	CookieMap       map[string]string
-	UpdatedCookies  bool
+	CookieStr      string
+	CookieMap      map[string]string
+	UpdatedCookies bool
 
 	// Extracted credentials
 	DSID            string
 	CKDatabaseURL   string
 	AccountInfoJSON string
+
+	// ClientID identifies this client to CloudKit. It must be stable for the whole session:
+	// the continuationMarker cursor and the paginated /records/query chain are bound to it
+	// (ISS-014). Minting a new one per request made the server treat each page as a
+	// different client.
+	ClientID string
 }
 
 var currentSession *Session
@@ -143,6 +150,8 @@ func NewSession(cookieStr string, isChinaMainland bool) (*Session, error) {
 		Domain:          domain,
 		CookieStr:       cookieStr,
 		CookieMap:       cookieMap,
+		// One ClientID per session (ISS-014).
+		ClientID: generateClientID(),
 	}
 
 	sessionMu.Lock()
@@ -178,20 +187,33 @@ func (s *Session) ExtractAndSaveCookies(resp *http.Response) {
 	}
 }
 
-// BuildCookieHeader formats cookies in CookieMap into standard HTTP Cookie header
+// BuildCookieHeader formats cookies in CookieMap into a standard HTTP Cookie header.
+//
+// The keys MUST be sorted. Go deliberately randomises `map` iteration order, so the naive
+// `for k, v := range s.CookieMap` produced a *different string* for the same cookie set on
+// every call. Kotlin compares the persisted cookie string with the freshly serialised one to
+// decide whether credentials rotated, so that non-determinism made every cold start look like
+// a rotation: `Cookies rotated (len 2893 -> 2893)`, followed by a session-generation bump that
+// marked the entire cached library stale. Sorting makes the serialisation canonical, which
+// also makes persisted cookie strings diffable in logs and stable across process restarts.
 func (s *Session) BuildCookieHeader() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	keys := make([]string, 0, len(s.CookieMap))
+	for k := range s.CookieMap {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
 	var b strings.Builder
-	first := true
-	for k, v := range s.CookieMap {
-		if !first {
+	for i, k := range keys {
+		if i > 0 {
 			b.WriteString("; ")
 		}
 		b.WriteString(k)
 		b.WriteString("=")
-		b.WriteString(v)
-		first = false
+		b.WriteString(s.CookieMap[k])
 	}
 	return b.String()
 }

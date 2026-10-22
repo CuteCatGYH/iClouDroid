@@ -11,7 +11,9 @@ import androidx.room.PrimaryKey
         Index(value = ["masterId"]),
         Index(value = ["isHidden"]),
         // P2-012: cover the paging query's exact ORDER BY so the stable sort stays cheap.
-        Index(value = ["isHidden", "assetDate", "id"])
+        Index(value = ["isHidden", "assetDate", "id"]),
+        // P2-016: the month-section queries filter on yearMonth and order inside the month.
+        Index(value = ["yearMonth", "assetDate", "id"])
     ]
 )
 data class PhotoAssetEntity(
@@ -38,9 +40,22 @@ data class PhotoAssetEntity(
     /**
      * Go core session generation at the time these URLs were minted.
      *
-     * A rebuilt Go [com.getup.icloudcore.Session] invalidates every previously issued CDN
-     * signature immediately, so rows whose generation no longer matches the current one must be
-     * refreshed before use (see ISS-016 / P2-005).
+     * Measured behaviour (ISS-026): a rebuilt Go session does **not** invalidate previously
+     * issued CDN signatures — they stay valid until they age out (~15-18 min). The generation is
+     * therefore only a hint for the account-switch case, not a hard expiry signal.
      */
-    val sessionGeneration: Int = 0
+    val sessionGeneration: Int = 0,
+
+    /**
+     * Month bucket key, formatted `yyyyMM` (e.g. `202508`), computed from [assetDate] in the
+     * **device's local timezone**.
+     *
+     * P2-016: this is the scroll anchor. The gallery groups photos into month sections and keys
+     * the lazy list by month, so position survives any list rebuild — an integer index does not,
+     * and invalidating itself on every APPEND is exactly what made the old grid jump to the top.
+     *
+     * `0` means "not yet bucketed". That happens for rows written before the v4 migration and
+     * for rows the scanner has not reached yet; [MonthScanEngine] backfills them.
+     */
+    val yearMonth: Int = 0
 )

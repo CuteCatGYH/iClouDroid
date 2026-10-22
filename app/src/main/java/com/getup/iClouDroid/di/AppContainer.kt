@@ -2,6 +2,7 @@ package com.getup.iClouDroid.di
 
 import android.content.Context
 import com.getup.iClouDroid.data.session.SessionManager
+import com.getup.iClouDroid.feature.photos.data.MonthScanEngine
 import com.getup.iClouDroid.feature.photos.data.PhotoDatabase
 import com.getup.iClouDroid.feature.photos.data.PhotoRepository
 
@@ -28,6 +29,17 @@ class AppContainer(private val appContext: Context) {
 
     val photoRepository: PhotoRepository by lazy {
         PhotoRepository(photoDatabase, sessionManager)
+    }
+
+    /**
+     * Walks the whole library into month sections (P2-016).
+     *
+     * App-scoped rather than ViewModel-scoped on purpose: the scan must keep running when the
+     * screen goes away, and it is driven from both the UI (`viewModelScope`) and
+     * `MonthScanWorker`. Both paths contend on the same instance, which serialises them.
+     */
+    val monthScanEngine: MonthScanEngine by lazy {
+        MonthScanEngine(photoDatabase, photoRepository)
     }
 
     // Future features plug in here:

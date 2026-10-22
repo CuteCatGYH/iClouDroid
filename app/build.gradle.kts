@@ -76,12 +76,19 @@ dependencies {
     implementation(libs.androidx.media3.exoplayer)
     implementation(libs.androidx.media3.ui)
 
+    // WorkManager: keeps the month scan running while the app is backgrounded (P2-016).
+    implementation(libs.androidx.work.runtime)
+
     // Extended Icons
     implementation(libs.androidx.compose.material.icons.extended)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     testImplementation(libs.junit)
+    // Real org.json implementation for JVM unit tests. The android.jar stub throws on every
+    // call in the local test runtime, so JSON-parsing logic (classifyCoreResponse) can only be
+    // exercised against this.
+    testImplementation(libs.json)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
 }

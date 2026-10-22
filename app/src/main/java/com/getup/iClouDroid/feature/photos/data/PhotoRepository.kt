@@ -2,12 +2,10 @@ package com.getup.iClouDroid.feature.photos.data
 
 import android.content.Context
 import android.util.Log
-import androidx.paging.ExperimentalPagingApi
-import androidx.paging.Pager
-import androidx.paging.PagingConfig
-import androidx.paging.PagingData
+import com.getup.iClouDroid.BuildConfig
 import com.getup.iClouDroid.data.session.SessionManager
 import com.getup.iClouDroid.feature.photos.data.db.PhotoAssetEntity
+import com.getup.iClouDroid.feature.photos.data.db.PhotoMonthIndexEntity
 import com.getup.iClouDroid.feature.photos.data.db.SyncStateEntity
 import com.getup.icloudcore.Icloudcore
 import kotlinx.coroutines.CoroutineScope
@@ -30,12 +28,175 @@ data class RefreshedUrls(
     val videoComplUrl: String?
 )
 
+/**
+ * What a Go core failure actually means (P2-015).
+ *
+ * Names mirror the `errorCode` values emitted by `go-core/errors.go` so the mapping is a plain
+ * name lookup. [NONE] means the response reported success.
+ */
+internal enum class CoreErrorKind {
+    NONE,
+    AUTH_EXPIRED,
+    NOT_FOUND,
+    RATE_LIMITED,
+    TIMEOUT,
+    NETWORK,
+    PARSE,
+    ZONE_MISSING,
+    UNKNOWN
+}
+
+/**
+ * A classified Go core response.
+ *
+ * @param kind what the failure means; drives retry-vs-rebuild decisions.
+ * @param httpStatus raw HTTP status when Go reported one, otherwise 0.
+ * @param message human-readable detail, already safe to log (no signed URLs).
+ */
+internal data class CoreError(
+    val kind: CoreErrorKind,
+    val httpStatus: Int,
+    val message: String
+)
+
+/**
+ * One raw page of the photo library, as consumed by [MonthScanEngine] (P2-016).
+ *
+ * [hasMore] is already collapsed to `false` when the cursor is blank, so callers never have to
+ * guard against "hasMore but no way to continue".
+ */
+internal data class ScanPage(
+    val photos: List<PhotoAssetEntity>,
+    val nextMarker: String,
+    val hasMore: Boolean
+)
+
+/**
+ * A failed page fetch, carrying the raw JSON so the caller can classify it.
+ *
+ * The scan needs the *kind* of failure, not just the fact of one: a 429 must be retried against
+ * the same cursor, while a 401 means the cursor is dead and the walk must restart (ISS-020).
+ */
+internal class CoreFetchFailure(
+    val rawJson: String,
+    val kind: CoreErrorKind,
+    cause: Throwable? = null
+) : Exception(cause?.message ?: "core fetch failed", cause)
+
+/**
+ * Matches an explicit HTTP status token such as `HTTP 401`, `status:421`, `StatusCode=401`.
+ * The `\b` word boundary prevents accidental hits inside longer digit/base64 runs.
+ */
+private val AUTH_STATUS_TOKEN_REGEX =
+    Regex("""(?:HTTP|status|StatusCode)\s*[:=]?\s*(?:401|421)\b""", RegexOption.IGNORE_CASE)
+
+/**
+ * Classifies a Go core response JSON into a [CoreError] (P2-015).
+ *
+ * Pure and free of Android/Room/Go dependencies so it can be unit tested directly. This is the
+ * single place that decides what a failure *means*, which matters far more once the month scan
+ * issues a long chain of `/records/query` calls: a transient timeout or a 429 must be retried
+ * with backoff, **not** mistaken for an expired session (a rebuild costs a `/validate` round trip
+ * and re-signs every cached URL).
+ *
+ * Order of preference:
+ *  1. `errorCode` from Go — a closed set, never invented locally.
+ *  2. `httpStatus` — used when the errorCode is absent (e.g. an older AAR).
+ *  3. `errorMessage` regex — last-resort compatibility shim.
+ *
+ * Any parse failure returns [CoreErrorKind.UNKNOWN] rather than throwing: failing open is what
+ * keeps a malformed response from ever triggering an expensive rebuild.
+ *
+ * History this guards: ISS-013 / ISS-015 (a `jsonStr.contains("401")` check matched base64
+ * `continuationMarker` payloads), ISS-020 (a dead cursor must be dropped, but only on a confirmed
+ * 401).
+ */
+internal fun classifyCoreResponse(jsonStr: String): CoreError {
+    if (jsonStr.isBlank()) {
+        return CoreError(CoreErrorKind.UNKNOWN, 0, "Empty response")
+    }
+
+    return try {
+        val json = JSONObject(jsonStr)
+        val success = json.optBoolean("success", false)
+        val errorCode = json.optString("errorCode", "")
+        val httpStatus = json.optInt("httpStatus", 0)
+        val message = json.optString("errorMessage", "")
+
+        if (success) {
+            return CoreError(CoreErrorKind.NONE, httpStatus, "")
+        }
+
+        // 1. Structured error code straight from the Go core.
+        if (errorCode.isNotBlank()) {
+            val kind = CoreErrorKind.entries.firstOrNull { it.name == errorCode }
+                ?: CoreErrorKind.UNKNOWN
+            return CoreError(kind, httpStatus, message)
+        }
+
+        // 2. Raw status code, for responses produced by an older AAR.
+        when (httpStatus) {
+            401, 421 -> return CoreError(CoreErrorKind.AUTH_EXPIRED, httpStatus, message)
+            404 -> return CoreError(CoreErrorKind.NOT_FOUND, httpStatus, message)
+            429 -> return CoreError(CoreErrorKind.RATE_LIMITED, httpStatus, message)
+        }
+
+        // 3. Last-resort text match. Only ever applied to `errorMessage` — never the whole
+        // document — and only with a word boundary, so base64 payloads cannot hit it.
+        if (message.isBlank()) {
+            return CoreError(CoreErrorKind.UNKNOWN, httpStatus, "")
+        }
+        if (message.contains("AUTH_EXPIRED") ||
+            message.contains("No active session") ||
+            message.contains("CloudKit database URL is not set") ||
+            AUTH_STATUS_TOKEN_REGEX.containsMatchIn(message)
+        ) {
+            return CoreError(CoreErrorKind.AUTH_EXPIRED, httpStatus, message)
+        }
+        if (message.contains("PrimarySync zone not found")) {
+            return CoreError(CoreErrorKind.ZONE_MISSING, httpStatus, message)
+        }
+
+        CoreError(CoreErrorKind.UNKNOWN, httpStatus, message)
+    } catch (e: Exception) {
+        CoreError(CoreErrorKind.UNKNOWN, 0, e.message ?: "")
+    }
+}
+
+/**
+ * Parses a `k1=v1; k2=v2` cookie header into its unordered key/value pairs (P2-019).
+ *
+ * Order-insensitive by construction, so serialisation jitter can never masquerade as a credential
+ * change. Values may legitimately contain `=` (base64), hence the split is limited to the first
+ * separator. Blank parts and RFC 2965 `$`-prefixed attributes are skipped.
+ *
+ * Top-level and `internal` rather than private to the repository, purely so it can be unit tested
+ * without standing up Room or the Go core.
+ */
+internal fun parseCookiePairs(cookieStr: String?): Set<Pair<String, String>> {
+    if (cookieStr.isNullOrBlank()) return emptySet()
+    return cookieStr.split(';')
+        .map { it.trim() }
+        .filter { it.isNotEmpty() && !it.startsWith("$") }
+        .mapNotNull { part ->
+            val idx = part.indexOf('=')
+            if (idx <= 0) {
+                null
+            } else {
+                part.substring(0, idx).trim() to part.substring(idx + 1).trim()
+            }
+        }
+        .toSet()
+}
+
 class PhotoRepository(
     private val database: PhotoDatabase,
     private val sessionManager: SessionManager
 ) {
     private val photoDao = database.photoDao()
     private val syncStateDao = database.syncStateDao()
+    private val photoMonthIndexDao = database.photoMonthIndexDao()
+    private val scanStateDao = database.scanStateDao()
     private val sessionMutex = Mutex()
 
     // ----------------------------------------------------------------------------------------
@@ -59,30 +220,45 @@ class PhotoRepository(
 
     val totalCountFlow: Flow<Int> = photoDao.getCount()
 
-    @OptIn(ExperimentalPagingApi::class)
-    val photoPagingFlow: Flow<PagingData<PhotoAssetEntity>> = Pager(
-        config = PagingConfig(
-            pageSize = 60,
-            // P2-016: every APPEND returns MediatorResult.Success, and Paging 3 responds by
-            // invalidating the PagingSource and reloading up to `initialLoadSize` rows. Measured
-            // on device: the reloaded `itemCount` always collapses to exactly `initialLoadSize`
-            // (60 -> 60, 360 -> 360), and any scroll position beyond that gets clamped back.
-            //
-            // That invalidation cannot be avoided while a RemoteMediator is in play, so instead
-            // make sure it always happens while the user is nowhere near the boundary:
-            //   - prefetchDistance is huge, so APPEND kicks off many pages before the user
-            //     reaches the end of the loaded window;
-            //   - initialLoadSize is large enough to comfortably contain the anchor that Room's
-            //     PagingSource hands back on reload.
-            // The user then never sees the collapse, because it always happens far below the
-            // viewport. Rows are plain Room entities (no bitmaps), so a wide window is cheap.
-            prefetchDistance = PREFETCH_DISTANCE,
-            enablePlaceholders = false,
-            initialLoadSize = INITIAL_LOAD_SIZE
-        ),
-        remoteMediator = PhotoRemoteMediator(this, database),
-        pagingSourceFactory = { photoDao.pagingSource() }
-    ).flow
+    /**
+     * Month sections for the gallery (P2-016).
+     *
+     * Replaces the old `photoPagingFlow`. Paging 3 is gone entirely: `RemoteMediator` invalidated
+     * its `PagingSource` after every APPEND, which collapsed `itemCount` to `initialLoadSize` and
+     * clamped the scroll position — the jump-to-top of ISS-021. There is no tunable for that; the
+     * only fix is to stop paging.
+     */
+    val monthIndexFlow: Flow<List<PhotoMonthIndexEntity>> = photoMonthIndexDao.observeAll()
+
+    /** Photos of a single month, newest first. Subscribed per visible month by the UI. */
+    fun observeMonth(yearMonth: Int): Flow<List<PhotoAssetEntity>> =
+        photoDao.observeMonth(yearMonth)
+
+    /**
+     * Recomputes the index rows for the given months from the photo table.
+     *
+     * Room cannot express `INSERT ... SELECT` with aggregates, so this is a read-then-upsert per
+     * month. Only called for months that were actually touched, so it stays cheap.
+     */
+    private suspend fun rebuildMonthIndexFor(yearMonths: List<Int>) {
+        for (ym in yearMonths) {
+            if (ym <= 0) continue
+            val aggregate = photoDao.monthAggregate(ym) ?: continue
+            if (aggregate.itemCount <= 0) {
+                photoMonthIndexDao.deleteMonth(ym)
+            } else {
+                photoMonthIndexDao.upsert(
+                    PhotoMonthIndexEntity(
+                        yearMonth = ym,
+                        itemCount = aggregate.itemCount,
+                        firstAssetDate = aggregate.firstAssetDate ?: 0L,
+                        lastAssetDate = aggregate.lastAssetDate ?: 0L,
+                        isComplete = false
+                    )
+                )
+            }
+        }
+    }
 
     /**
      * Session Guard: Verifies that Go core has an active session.
@@ -125,32 +301,53 @@ class PhotoRepository(
 
                 val dsid = json.optString("dsid", "")
                 val ckUrl = json.optString("ckDatabaseUrl", "")
+
+                // Detect an account switch that did NOT go through logout().
+                //
+                // `wipeAllData()` clears the photo cache on sign-out (P2-018), but logging in as a
+                // *different* Apple ID without signing out first bypasses that entirely: the
+                // local rows, the sync cursor and — critically — the month-scan cursor still
+                // belong to the previous account. The previous state was catastrophic in a subtle
+                // way: `scan_state.isComplete` stayed 1, so the new account's scan either refused
+                // to run or ran without bucketing, and its photos sat at `yearMonth = 0` where the
+                // gallery cannot see them, behind a count that looked plausible.
+                val previousDsid = sessionManager.getDsid()
+                if (dsid.isNotBlank() && previousDsid != null && previousDsid.isNotBlank() &&
+                    previousDsid != dsid
+                ) {
+                    Log.w(TAG, "Account changed ($previousDsid -> $dsid) - discarding cached library")
+                    runCatching { wipeAllData() }
+                        .onFailure { Log.e(TAG, "Wipe on account change failed", it) }
+                }
+
                 if (dsid.isNotBlank() && ckUrl.isNotBlank()) {
                     sessionManager.updateRouteInfo(dsid, ckUrl)
                 }
 
-                // A brand new Go session has just minted fresh CWW signatures, so every URL
-                // currently stored is dead. Bump the generation exactly once here — and only
-                // here — so rows carry the generation that produced their URLs.
-                markSessionReady()
+                // Persist whatever cookie material Go handed back. This does NOT bump the
+                // session generation any more (P2-019).
+                //
+                // Measured on device (SM-F9760): a URL minted under generation N still returns
+                // 206 after the session is fully rebuilt into generation N+1 — the CDN signature
+                // is bound to the record, not to the session that handed it out. Meanwhile
+                // Apple rotates `X-APPLE-WEBAUTH-TOKEN` and `X-APPLE-WEBAUTH-VALIDATE` on *every*
+                // `/validate` handshake (3/3 trials), so keying the generation bump off cookie
+                // values meant every genuine rebuild re-marked the whole library stale and fired
+                // one `/records/lookup` per visible thumbnail. That is the real source of the
+                // P2-008 refresh storm, not the ordering jitter alone.
+                //
+                // Generation is now bumped only by an explicit `force` rebuild or by the
+                // 401/421 recovery paths (see [markSessionReady] callers), which is exactly the
+                // "credentials are dead" signal. Expiry itself is handled by age, see
+                // [ICloudPhotoInterceptor.URL_MAX_AGE_MS].
+                applyRefreshedCookies(isChina, dsid, ckUrl)
+                markSessionReady(bumpGeneration = force)
 
                 // NOTE (P2-014): deliberately do NOT drop the continuationMarker here. This
                 // method also runs on the plain cold-start path (force=false) where we are
                 // merely re-attaching to a cached DB — the persisted cursor is still valid and
                 // is our only way to keep paginating. It is dropped only on the auth-error
                 // recovery path, see [invalidateContinuationCursor].
-
-                if (Icloudcore.hasCookieUpdates()) {
-                    val updatedCookies = Icloudcore.getCurrentCookieString()
-                    val oldCookies = sessionManager.getCookieString()
-                    if (!updatedCookies.isNullOrBlank() && updatedCookies != oldCookies) {
-                        Log.d(
-                            TAG,
-                            "Cookies refreshed (len ${oldCookies?.length ?: 0} -> ${updatedCookies.length})"
-                        )
-                        sessionManager.saveSession(updatedCookies, isChina, dsid, ckUrl)
-                    }
-                }
 
                 Result.success(Unit)
             } catch (e: Exception) {
@@ -161,15 +358,84 @@ class PhotoRepository(
     }
 
     /**
-     * Records that a fresh Go session generation is now active.
+     * Persists any cookie material Go handed back during the handshake.
      *
-     * Bumping the counter (persisted) is what invalidates every previously minted download URL:
-     * any [PhotoAssetEntity] stamped with an older generation is treated as stale by
-     * [com.getup.iClouDroid.feature.photos.data.image.ICloudPhotoInterceptor] and force-refreshed instead of
-     * being requested with a dead signature.
+     * "Changed" means the actual **key/value pairs** differ — not that the serialised string
+     * differs. Comparing raw strings was a bug (P2-019): Go iterated its `CookieMap` in
+     * randomised order, so the same cookie set serialised to a different string on every call and
+     * every cold start looked like a rotation (`Cookies rotated (len 2893 -> 2893)` in the logs).
+     * The Go side now sorts its keys ([go-core/session.go] `BuildCookieHeader`); this set-based
+     * check is the defence in depth against any future ordering jitter.
+     *
+     * IMPORTANT: the return value is **no longer used to bump the session generation**. It did
+     * once, on the theory that rotated credentials invalidate every previously issued URL. That
+     * theory was measured and disproved (see `.artifacts/url_lifetime_experiment.md`): a URL
+     * minted under generation N still returns `206` after a rebuild into N+1, while Apple rotates
+     * `X-APPLE-WEBAUTH-TOKEN` / `X-APPLE-WEBAUTH-VALIDATE` on *every* `/validate`. So the old
+     * wiring bumped the generation on every genuine rebuild for no reason. The flag is kept for
+     * logging/diagnostics only; URL expiry is handled by age in the Coil interceptor.
+     *
+     * @return true when the stored cookie set actually changed (diagnostics only).
      */
-    private fun markSessionReady() {
-        sessionManager.bumpSessionGeneration()
+    private fun applyRefreshedCookies(isChina: Boolean, dsid: String, ckUrl: String): Boolean {
+        if (!Icloudcore.hasCookieUpdates()) return false
+
+        val updatedCookies = Icloudcore.getCurrentCookieString()
+        if (updatedCookies.isNullOrBlank()) return false
+
+        val oldCookies = sessionManager.getCookieString()
+        val updatedPairs = parseCookiePairs(updatedCookies)
+        val oldPairs = parseCookiePairs(oldCookies)
+        if (updatedPairs == oldPairs) {
+            // Same cookie material, merely re-serialised. Do NOT persist and do NOT count as a
+            // rotation: the stored URLs are still signed by these very keys.
+            Log.d(TAG, "Cookie updates reported but set is unchanged (order-only jitter)")
+            return false
+        }
+
+        // Name which pairs changed. Cookie *values* are never logged (they are live credentials,
+        // AGENTS §8.2) — only names and counts. `valueChanged` is what made P2-019 diagnosable:
+        // it revealed that only the short-lived `VALIDATE` / `TOKEN` pair actually rotates on
+        // every `/validate`, while the rest of the set is stable.
+        if (BuildConfig.DEBUG) {
+            val oldByName = oldPairs.toMap()
+            val newByName = updatedPairs.toMap()
+            Log.d(
+                TAG,
+                "Cookie diff: added=${newByName.keys - oldByName.keys} " +
+                    "removed=${oldByName.keys - newByName.keys} " +
+                    "valueChanged=${
+                        oldByName.keys.intersect(newByName.keys)
+                            .filter { oldByName[it] != newByName[it] }
+                    }"
+            )
+        }
+
+        Log.d(TAG, "Cookies rotated (pairs ${oldPairs.size} -> ${updatedPairs.size})")
+        sessionManager.saveSession(updatedCookies, isChina, dsid, ckUrl)
+        return true
+    }
+
+
+
+    /**
+     * Records that a Go session is now active.
+     *
+     * @param bumpGeneration true only for an explicit `force` rebuild (auth-error recovery).
+     *   Cookie-value changes during a normal handshake deliberately no longer bump: measurement
+     *   showed a URL stays valid across a full session rebuild, and Apple rotates two cookies on
+     *   every `/validate`, so the old cookie-driven bump fired on every rebuild and marked the
+     *   whole cached library stale (`.artifacts/url_lifetime_experiment.md`).
+     *
+     *   The generation still serves the account-switch case: after a logout/login the rows are
+     *   cleared anyway (P2-018), but any that survive carry a stale stamp that lets the Coil
+     *   interceptor treat them as suspicious sooner.
+     */
+    private fun markSessionReady(bumpGeneration: Boolean) {
+        if (bumpGeneration) {
+            val next = sessionManager.bumpSessionGeneration()
+            Log.i(TAG, "Session generation -> $next (URLs previously minted are now stale)")
+        }
         sessionUrlRefreshedAt = System.currentTimeMillis()
     }
 
@@ -204,43 +470,12 @@ class PhotoRepository(
      * base64 `continuationMarker` / `syncToken` / record UUIDs routinely contain the literal
      * digits `401` / `421`, which used to make every other page look like an auth failure and
      * trigger a full session rebuild (see ISS-015 / P2-001).
+     *
+     * Kept as a thin wrapper over [classifyCoreResponse] so every call site reads the same way it
+     * always has; the classification itself now comes from the Go core layer (P2-015).
      */
-    private fun isAuthError(jsonStr: String): Boolean {
-        return try {
-            val json = JSONObject(jsonStr)
-
-            // Preference 1: structured errorCode emitted by the Go core layer.
-            val errorCode = json.optString("errorCode", "")
-            if (errorCode.isNotBlank()) {
-                return errorCode == "AUTH_EXPIRED"
-            }
-
-            if (json.optBoolean("success", false)) {
-                return false
-            }
-
-            // Preference 2: any explicitly reported HTTP status.
-            val httpStatus = json.optInt("httpStatus", 0)
-            if (httpStatus == 401 || httpStatus == 421) {
-                return true
-            }
-
-            // Fallback: only inspect the errorMessage field, with a word-boundary regex, so
-            // arbitrary base64 content can never be mistaken for a status code.
-            val msg = json.optString("errorMessage", "")
-            if (msg.isBlank()) {
-                return false
-            }
-            msg.contains("AUTH_EXPIRED") ||
-                msg.contains("No active session") ||
-                msg.contains("CloudKit database URL is not set") ||
-                AUTH_STATUS_REGEX.containsMatchIn(msg)
-        } catch (e: Exception) {
-            // Fail open: a parse failure must never trigger an expensive session rebuild.
-            Log.w(TAG, "isAuthError parse failed, treating as non-auth error: ${e.message}")
-            false
-        }
-    }
+    private fun isAuthError(jsonStr: String): Boolean =
+        classifyCoreResponse(jsonStr).kind == CoreErrorKind.AUTH_EXPIRED
 
     private fun parseHttpStatus(jsonStr: String): Int {
         return try {
@@ -259,6 +494,7 @@ class PhotoRepository(
     }
 
     suspend fun checkZoneReady(): Result<Boolean> = withContext(Dispatchers.IO) {
+        wipeBlocked()?.let { return@withContext Result.failure(it.exceptionOrNull()!!) }
         var sessionCheck = ensureGoSession()
         if (sessionCheck.isFailure) {
             return@withContext Result.failure(sessionCheck.exceptionOrNull() ?: Exception("会话建立失败"))
@@ -290,6 +526,7 @@ class PhotoRepository(
     }
 
     suspend fun fetchInitialPage(limit: Int = 100): Result<Int> = withContext(Dispatchers.IO) {
+        wipeBlocked()?.let { return@withContext Result.failure(it.exceptionOrNull()!!) }
         var sessionCheck = ensureGoSession()
         if (sessionCheck.isFailure) {
             return@withContext Result.failure(sessionCheck.exceptionOrNull() ?: Exception("会话建立失败"))
@@ -341,6 +578,7 @@ class PhotoRepository(
     }
 
     suspend fun fetchNextPage(limit: Int = 100): Result<Int> = withContext(Dispatchers.IO) {
+        wipeBlocked()?.let { return@withContext Result.failure(it.exceptionOrNull()!!) }
         var sessionCheck = ensureGoSession()
         if (sessionCheck.isFailure) {
             return@withContext Result.failure(sessionCheck.exceptionOrNull() ?: Exception("会话建立失败"))
@@ -407,7 +645,62 @@ class PhotoRepository(
         }
     }
 
+    /**
+     * One raw page for the month scan (P2-016).
+     *
+     * Unlike [fetchInitialPage] / [fetchNextPage] this neither persists a cursor nor writes to
+     * Room — the scan owns its own cursor (`scan_state`) and decides what a failure means, because
+     * it must distinguish "back off and retry" from "the session is dead" (P2-015).
+     *
+     * Only **confirmed** auth failures trigger a rebuild here, and the caller is responsible for
+     * dropping its cursor when that happens (ISS-020).
+     */
+    internal suspend fun fetchScanPage(
+        marker: String,
+        limit: Int
+    ): Result<ScanPage> = withContext(Dispatchers.IO) {
+        if (isWiping) {
+            return@withContext Result.failure(Exception("正在退出登录，已暂停照片同步"))
+        }
+
+        val sessionCheck = ensureGoSession()
+        if (sessionCheck.isFailure) {
+            return@withContext Result.failure(
+                sessionCheck.exceptionOrNull() ?: Exception("会话建立失败")
+            )
+        }
+
+        try {
+            val jsonStr = Icloudcore.fetchPhotoPage(marker, limit.toLong())
+            val error = classifyCoreResponse(jsonStr)
+
+            if (error.kind != CoreErrorKind.NONE) {
+                Log.w(TAG, "fetchScanPage failed (${error.kind}, HTTP ${error.httpStatus})")
+                return@withContext Result.failure(
+                    CoreFetchFailure(jsonStr, error.kind, Exception(error.message))
+                )
+            }
+
+            val json = JSONObject(jsonStr)
+            val photos = parsePhotoItems(json.optJSONArray("photos"))
+            val nextMarker = json.optString("continuationMarker", "")
+            val hasMore = json.optBoolean("hasMore", false)
+
+            Result.success(
+                ScanPage(
+                    photos = photos,
+                    nextMarker = nextMarker,
+                    hasMore = hasMore && nextMarker.isNotBlank()
+                )
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "fetchScanPage error", e)
+            Result.failure(e)
+        }
+    }
+
     suspend fun syncIncremental(limit: Int = 100): Result<Int> = withContext(Dispatchers.IO) {
+        wipeBlocked()?.let { return@withContext Result.failure(it.exceptionOrNull()!!) }
         var sessionCheck = ensureGoSession()
         if (sessionCheck.isFailure) {
             return@withContext Result.failure(sessionCheck.exceptionOrNull() ?: Exception("会话建立失败"))
@@ -453,6 +746,9 @@ class PhotoRepository(
             if (newPhotos.isNotEmpty()) {
                 Log.d(TAG, "Upserting ${newPhotos.size} new/modified photos to local db")
                 photoDao.upsertAll(newPhotos)
+                // Keep the month sections in step, or the synced photos stay stranded at
+                // yearMonth = 0 and never appear in the gallery (P2-016).
+                rebuildMonthIndexFor(newPhotos.map { it.yearMonth }.distinct())
             }
 
             syncStateDao.setSyncState(
@@ -498,6 +794,10 @@ class PhotoRepository(
         masterId: String,
         force: Boolean = false
     ): Result<RefreshedUrls> {
+        // A logout is tearing the DB down; minting URLs for rows that are about to disappear only
+        // burns a `/records/lookup` and can race the wipe.
+        wipeBlocked()?.let { return Result.failure(it.exceptionOrNull()!!) }
+
         // Layer 2: recent successful refresh -> serve from DB (unless the caller forces a re-mint).
         if (!force) {
             refreshMutex.withLock {
@@ -551,6 +851,7 @@ class PhotoRepository(
                 return@withContext Result.success(emptyMap())
             }
 
+            wipeBlocked()?.let { return@withContext Result.failure(it.exceptionOrNull()!!) }
             ensureGoSession().onFailure { return@withContext Result.failure(it) }
 
             try {
@@ -720,7 +1021,12 @@ class PhotoRepository(
                     videoComplUrl = videoComplUrl,
                     recordChangeTag = changeTag,
                     urlFetchedAt = now,
-                    sessionGeneration = generation
+                    sessionGeneration = generation,
+                    // Bucket on the way in. Without this every row lands at `yearMonth = 0`, which
+                    // the gallery's month queries never select — the photos exist and are counted,
+                    // but are invisible. The scan used to fix them up afterwards; `syncIncremental`
+                    // did not, so incrementally-synced photos silently disappeared from the grid.
+                    yearMonth = MonthBucketing.yearMonthOf(assetDate)
                 )
             )
         }
@@ -744,33 +1050,103 @@ class PhotoRepository(
      */
     fun currentSessionGeneration(): Int = sessionManager.getSessionGeneration()
 
+    // ----------------------------------------------------------------------------------------
+    // Logout / account-switch teardown (P2-018)
+    // ----------------------------------------------------------------------------------------
+
+    /**
+     * True while a logout wipe is running.
+     *
+     * Every network entry point in this class checks this and bails out immediately. Without it,
+     * a [PhotoRemoteMediator] APPEND that is already mid-flight can complete its `upsertAll()`
+     * *after* the tables were cleared, leaving the previous account's rows behind — the exact
+     * "list shows the old account's photos" symptom of P2-018.
+     *
+     * The flag is deliberately a plain [Volatile] boolean rather than a suspending/flow-based
+     * guard: it is only ever set from `logout()` on the main thread, and the entry points read it
+     * synchronously before doing any work, so there is no window where a stale value could leak
+     * through. See docs/PITFALLS.md §7 ("synchronous sentinel > async state machine").
+     */
+    @Volatile
+    var isWiping: Boolean = false
+        private set
+
+    /**
+     * Blocks all further network work ahead of a wipe. Must be called before [wipeAllData].
+     *
+     * Setting this first is what makes the teardown race-free: `RemoteMediator` checks it at the
+     * top of every `load()`, so once it is true no new page can be requested, and any APPEND
+     * already past that check will be awaited by the caller's `stopSync()` before the tables are
+     * dropped.
+     */
+    fun beginWipe() {
+        isWiping = true
+        Log.i(TAG, "Session teardown started - blocking all photo network entry points")
+    }
+
+    /** Re-enables network work once the wipe is finished (including on the failure path). */
+    fun endWipe() {
+        isWiping = false
+        Log.i(TAG, "Session teardown finished - photo network entry points re-enabled")
+    }
+
+    /**
+     * Rejects network work while [isWiping] is set.
+     *
+     * Callers return this as a *failure* rather than silently succeeding: a silent success would
+     * look like "0 photos" and let the UI render an empty-but-healthy grid.
+     */
+    private fun wipeBlocked(): Result<Unit>?
+        = if (isWiping) Result.failure(Exception("正在退出登录，已暂停照片同步")) else null
+
+    /**
+     * Public read-only view of the wipe guard for [MonthScanEngine].
+     *
+     * The scan must abort mid-walk when a logout teardown starts, otherwise it would keep writing
+     * rows for an account that is being wiped from underneath it (P2-018).
+     */
+    internal fun isWipeInProgress(): Boolean = isWiping
+
+    /**
+     * Clears everything this feature owns locally so the next login starts from a clean slate.
+     *
+     * Photo rows are keyed by CloudKit `recordName` and `sync_state` holds a `syncToken` /
+     * `continuationMarker` minted by a specific account — neither is meaningful for a different
+     * Apple ID or region. Leaving them behind makes the fresh session look "already synced" and
+     * then fail every URL refresh against records it cannot see (P2-018).
+     *
+     * Only the data layer is touched here; WebView cookies and the credential vault stay with the
+     * caller so the teardown order remains explicit. The caller must set [isWiping] *before*
+     * calling this.
+     *
+     * @return true when the wipe completed without an exception.
+     */
+    suspend fun wipeAllData(): Boolean = withContext(Dispatchers.IO) {
+        try {
+            // Clear the sync cursor first: if the second statement fails we have at worst lost the
+            // cursor (a full re-fetch) rather than kept a token pointing at deleted rows.
+            syncStateDao.clearAll()
+            scanStateDao.clearAll()
+            photoMonthIndexDao.clearAll()
+            photoDao.clearAll()
+
+            // In-memory refresh bookkeeping refers to masters that no longer exist.
+            refreshMutex.withLock {
+                recentRefreshes.clear()
+                inFlightRefreshes.clear()
+            }
+
+            Log.i(TAG, "Photo database wiped (photo_assets + sync_state + month index + scan state)")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "wipeAllData failed", e)
+            false
+        }
+    }
+
     companion object {
         private const val TAG = "PhotoRepository"
         const val KEY_PRIMARY_SYNC = "PRIMARY_SYNC"
-
-        /**
-         * Rows fetched on the first page after a PagingSource invalidation (P2-016).
-         *
-         * Each APPEND's [androidx.paging.RemoteMediator.MediatorResult.Success] invalidates the
-         * source and reloads up to this many rows — measured on device, `itemCount` always collapses
-         * to exactly this value. Keep it well above any realistic anchor so a reload never truncates
-         * the user's current position.
-         */
-        const val INITIAL_LOAD_SIZE = 60 * 20
-
-        /**
-         * How many items before the loaded boundary APPEND starts (P2-016).
-         *
-         * The invalidation that follows every APPEND cannot be avoided, so it must be scheduled to
-         * happen while the user is still well clear of the boundary — the temporary `itemCount`
-         * collapse then lands below the viewport and is invisible.
-         *
-         * This started out enormous (60*8) to push APPEND as early as possible, but on a fast
-         * scroll that requested several pages back-to-back and CloudKit started returning
-         * `context deadline exceeded` — the firehose was too wide. Three pages of lookahead is
-         * still far more than a screenful, which is all that is needed.
-         */
-        const val PREFETCH_DISTANCE = 60 * 3
 
         /**
          * Window within which a successful URL refresh for a given master is reused instead of

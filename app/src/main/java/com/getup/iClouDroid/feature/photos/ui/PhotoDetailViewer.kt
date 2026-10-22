@@ -45,6 +45,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -236,16 +237,36 @@ private fun ImageDetailView(
     var loadFailed by remember(photo.id) { mutableStateOf(false) }
     var isUrlIssue by remember(photo.id) { mutableStateOf(false) }
 
-    val model = remember(photo.id, reloadToken) {
-        ICloudImageModel.fromEntity(photo, ICloudImageModel.Quality.ORIGINAL)
+    // P2-010: Apple HDR captures are high bit depth (16-bit PNG or 10-bit HEVC `heix`).
+    // Android's BitmapFactory and ImageDecoder both refuse them, so the original always
+    // decodes to a null bitmap while the server-transcoded 8-bit JPEG thumbnails are fine.
+    // We degrade to the medium rendition (also a server-side JPEG) so the user sees the
+    // picture, and only surface a notice if even that fails.
+    //
+    // This must be a *remembered* value: SubcomposeAsyncImage may deliver several onError
+    // callbacks for one request, and without the flag we would keep re-requesting the
+    // undecodable original.
+    var degradedToMedium by remember(photo.id) { mutableStateOf(false) }
+
+    // True during the one-frame gap between "ORIGINAL failed to decode" and "MEDIUM request
+    // issued". Used to keep showing the spinner instead of flashing a failure panel.
+    var isDegrading by remember(photo.id) { mutableStateOf(false) }
+
+    val quality = if (degradedToMedium) {
+        ICloudImageModel.Quality.MEDIUM
+    } else {
+        ICloudImageModel.Quality.ORIGINAL
+    }
+
+    val model = remember(photo.id, reloadToken, quality) {
+        ICloudImageModel.fromEntity(photo, quality)
     }
 
     SubcomposeAsyncImage(
         model = ImageRequest.Builder(context)
             .data(model)
-            // P2-010: bound the decode to a sane resolution. Without this Coil decodes the full
-            // original, which is both memory-hungry and the path that used to fail on HDR
-            // gain-map HEICs. ImageDecoder still handles the gain map; this just caps the size.
+            // Bound the decode to a sane resolution; the drone shots are 12288x8192 and would
+            // otherwise need ~400MB for one bitmap.
             .size(2048)
             .crossfade(true)
             .build(),
@@ -255,39 +276,67 @@ private fun ImageDetailView(
         onError = {
             val throwable = it.result.throwable
             // P2-011: distinguish "the signed URL is dead" from "the bytes would not decode".
-            // Only the former is fixed by re-minting; the latter (e.g. an odd HEIC variant) would
-            // just burn a /records/lookup and still fail.
+            // Only the former is fixed by re-minting; the latter burn a /records/lookup and
+            // still fail.
             val httpCode = ImageLoadFailure.httpCodeOf(throwable)
             isUrlIssue = ImageLoadFailure.isExpiredUrl(throwable)
 
-            if (isUrlIssue && retryCount < MAX_IMAGE_RETRY) {
-                retryCount++
-                Log.i(
-                    TAG,
-                    "image url expired (HTTP $httpCode), re-minting master=${photo.masterId}, " +
-                        "retry=$retryCount"
-                )
-                scope.launch {
-                    // force = true: a deliberate single-asset action must not be vetoed by the
-                    // grid-thumbnail dedup window (P2-011).
-                    val refreshed = repository.refreshUrlsForMaster(photo.masterId, force = true)
-                    if (refreshed.isSuccess) {
-                        reloadToken++
-                    } else {
-                        loadFailed = true
+            when {
+                isUrlIssue && retryCount < MAX_IMAGE_RETRY -> {
+                    retryCount++
+                    Log.i(
+                        TAG,
+                        "image url expired (HTTP $httpCode), re-minting master=${photo.masterId}, " +
+                            "retry=$retryCount"
+                    )
+                    scope.launch {
+                        // force = true: a deliberate single-asset action must not be vetoed by
+                        // the grid-thumbnail dedup window (P2-011).
+                        val refreshed = repository.refreshUrlsForMaster(photo.masterId, force = true)
+                        if (refreshed.isSuccess) {
+                            reloadToken++
+                        } else {
+                            loadFailed = true
+                        }
                     }
                 }
-            } else {
-                if (!isUrlIssue) {
+
+                // Not a URL problem on the original -> almost certainly the high-bit-depth
+                // decode failure above. Drop to the medium rendition and try once more.
+                //
+                // NOTE: the state flip is deferred to the next frame. Mutating it inline from
+                // onError does not rebuild the AsyncImage: the callback runs while Coil is still
+                // finishing the failing request, so the new model would be swallowed and the
+                // retry never fires (observed as "degrading to MEDIUM" with no MEDIUM load).
+                //
+                // `isDegrading` covers that gap: it is flipped immediately so the error panel is
+                // never painted between the failed original and the medium request. Without it
+                // the user saw "该图片为 HDR..." flash for a frame or two before the picture.
+                !isUrlIssue && quality == ICloudImageModel.Quality.ORIGINAL -> {
                     Log.w(
                         TAG,
-                        "image decode failed (not a url issue) master=${photo.masterId} " +
-                            "error=${throwable.message}"
+                        "original decode failed master=${photo.masterId} " +
+                            "error=${throwable.message}, degrading to MEDIUM"
                     )
+                    isDegrading = true
+                    scope.launch {
+                        withFrameNanos { }
+                        degradedToMedium = true
+                    }
                 }
-                loadFailed = true
+
+                else -> {
+                    Log.w(
+                        TAG,
+                        "image decode failed master=${photo.masterId} " +
+                            "quality=$quality error=${throwable.message}"
+                    )
+                    isDegrading = false
+                    loadFailed = true
+                }
             }
         },
+        // While degrading, keep showing the spinner rather than the failure panel.
         loading = {
             Box(
                 modifier = Modifier.fillMaxSize(),
@@ -297,26 +346,48 @@ private fun ImageDetailView(
             }
         },
         error = {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(
-                        imageVector = Icons.Default.Warning,
-                        contentDescription = null,
-                        tint = Color(0xFFFF5252),
-                        modifier = Modifier.size(48.dp)
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        text = when {
-                            !loadFailed -> "图片加载失败"
-                            isUrlIssue -> "原图加载失败 (链接已失效)"
-                            else -> "原图无法解码 (该格式暂不支持)"
-                        },
-                        color = Color.White
-                    )
+            if (isDegrading) {
+                // Transitional frame between ORIGINAL failing and MEDIUM being requested.
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(color = Color.White)
+                }
+            } else {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = null,
+                            tint = Color(0xFFFF5252),
+                            modifier = Modifier.size(48.dp)
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = when {
+                                isUrlIssue -> "原图加载失败 (链接已失效)"
+                                // A+C: degraded once, still failed -> tell the user why and
+                                // point them at the download button.
+                                degradedToMedium ->
+                                    "该图片为 HDR 高动态范围格式，暂不支持预览\n可点击下方按钮下载原图"
+                                else -> "原图无法解码 (该格式暂不支持)"
+                            },
+                            color = Color.White,
+                            textAlign = TextAlign.Center
+                        )
+                        if (degradedToMedium) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = photo.filename,
+                                color = Color.White.copy(alpha = 0.7f),
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
                 }
             }
         },

@@ -46,17 +46,35 @@
 
 ## 3. `downloadURL` 临时直链过期与 Coil 缓存失效问题
 
-**问题本质**
+> 本节已有**实测数据**，详见 [ISS-026](../CHANGELOG_ISSUES.md#iss-026) 与
+> [url_lifetime_experiment.md](../.artifacts/url_lifetime_experiment.md)。
 
-`CPLMaster` 中返回的缩略图和原图 `downloadURL`（指向 `cvws.icloud-content.com.cn`）带有一次性签名时间戳，通常在 **1~2 小时后就会过期返回 `403 Forbidden`**。
+**问题本质（已实测，推翻旧说法）**
+
+| 旧文档说法 | 实测结果 |
+| --- | --- |
+| 有效期 **1~2 小时** | ❌ 实际 **~15~18 分钟**（882s 仍 200，1065s 变 410） |
+| **会话重建即失效** | ❌ 会话重建后旧 URL 仍返回 200 |
+
+所以：**URL 寿命只由时间决定，与会话代际无关。** CDN 签名绑定的是 record。
 
 **解决方案**
 
 1. **自定义 Coil 缓存 Key**
-   必须通过 `MemoryCache.Key(recordName)` 和 `diskCacheKey(recordName)` 将缓存主键绑定到永久不变的 `recordName` 上，而不是绑定到会变化的 `downloadURL` 上。
+   缓存主键绑定永久不变的 `recordName`，**绝不要**绑会变的 `downloadURL`：
+   `icloud_{recordName}_{quality}`。
 
-2. **按需刷新直链**
-   当本地磁盘缓存未命中、且数据库中记录的 `downloadURL` 已超过 1 小时，由 Coil 的自定义 `Fetcher` 调用 Go 层的 `/records/lookup` 接口，传入单个或一批 `recordName` 实时换取最新的 `downloadURL`。
+2. **按年龄主动换链**
+   `URL_MAX_AGE_MS = 12 分钟`（在实测寿命内留余量）。超过就主动调
+   `/records/lookup` 换新链，**不要等它变成 410**。
+
+3. **不要用代际作为刷新依据**
+   代际只能当「可能换了账号」的提示信号，不能当「URL 已死」的证据。
+
+> [!CAUTION]
+> **这类“有效期多久”的结论必须用 curl 实测，不要相信文档（包括本文）。**
+> 验证方法：从 DB 取一条 URL → `curl -s -o /dev/null -w '%{http_code}' -r 0-1023 '<url>'`。
+> 必须用 GET + `Range`，Apple CDN 对 `HEAD` 请求返回 `501`。
 
 ---
 
@@ -141,3 +159,109 @@ value := strings.Trim(strings.TrimSpace(kv[1]), `"`)  // 必须
 **Go 结构体零值陷阱**
 
 Go 结构体的零值（`false` / `""` / `0`）与"业务合法值"无法区分。只要结果结构里带标识字段，**每个 return 分支都必须显式赋值**，或统一走构造函数。
+
+---
+
+## 8. 退出登录（异步清理）的写回陷阱
+
+> 详细案例见 [ISS-025](../CHANGELOG_ISSUES.md#iss-025)
+
+退出登录不是一个瞬间动作，而是一段**异步清理窗口**。在这段窗口里，系统的其他部分仍在正常运行，
+并且会把手里的旧状态重新写回去。已实测的两条写回路径：
+
+| 写回路径 | 触发时机 | 后果 |
+| --- | --- | --- |
+| `PhotoRemoteMediator.load()` → `upsertAll()` | 飞行中的 APPEND 在 `clearAll()` 之后落库 | 旧账号照片行被重新写回 |
+| `ICloudWebView` Cookie 探针 → `onCookiesExtracted()` → `saveSession()` | `removeAllCookies` 完成前读到旧 Cookie | 会话被原地重建，`shared_prefs` 保留凭证 |
+
+**为什么 `AuthUiState` 挡不住**
+
+`logout()` 第一件事就是把状态置为 `NotLoggedIn`，而探针回调里的守卫写的是
+`if (state is Authenticating || state is LoggedIn) return` —— 于是 `NotLoggedIn` **恰好放行**了回调。
+
+```
+38.725 W/PhotosViewModel: checkZoneReady failed: 正在退出登录…   ← Repo 守卫拦住
+38.857 I/ICloudAuth: Three-element cookie validation PASSED     ← 状态守卫放行
+38.859 I/ICloudAuth: Calling Go InitSession
+```
+
+**正确做法**
+
+1. 用 `@Volatile` 布尔位，在 `logout()` **第一行**置位，早于任何清理
+2. 所有可能写回数据的异步回调入口都检查该位
+3. 释放时机在“清理完成 + 页面重载完成”之后（而非 `clearAll()` 返回就释放）
+
+```kotlin
+@Volatile private var isLoggingOut = false
+
+fun logout() {
+    isLoggingOut = true                    // 第一行
+    viewModelScope.launch {
+        repository.beginWipe()
+        try { /* 四阶段清理 */ }
+        finally {
+            repository.endWipe()
+            delay(800)                     // 等登录页重载
+            isLoggingOut = false
+        }
+    }
+}
+
+fun onCookiesExtracted(r: CookieValidationResult) {
+    if (isLoggingOut) return               // 关键
+    ...
+}
+```
+
+> [!CAUTION]
+> **新增任何「退出登录时需要清理的状态」，都要反问一次：它会不会被异步回调写回？**
+> 只清不拦，等于没清。
+
+**`removeAllCookies` 是异步的**
+
+传 `null` 只是放弃回调，**并不代表已同步完成**。紧接着 `flush()` 有可能把删除前的 jar 落盘，
+导致进程重启后旧 Cookie 仍然存在。必须把回调桥接成挂起点：
+
+```kotlin
+suspendCancellableCoroutine<Unit> { cont ->
+    cookieManager.removeAllCookies { if (cont.isActive) cont.resume(Unit) }
+}
+cookieManager.flush()
+```
+
+---
+
+## 9. Go map 迭代顺序是随机的
+
+> 详细案例见 [ISS-026](../CHANGELOG_ISSUES.md#iss-026)
+
+Go 语言**故意**打乱 `map` 的迭代顺序（防止依赖顺序的实现）。因此任何
+「遍历 map 拼出字符串 → 拿去做相等比较 / 持久化 / 下发给其他语言」的代码都是定时炸弹。
+
+本项目踩到的真实形态：
+
+```go
+// ❌ 同一份 Cookie 集合，每次调用得到不同的字符串
+for k, v := range s.CookieMap {
+    b.WriteString(k); b.WriteString("="); b.WriteString(v)
+}
+```
+
+Kotlin 侧拿这个字符串与持久化的比较，于是 **每次冷启动都被判定为“凭证已轮转”**。
+
+```go
+// ✅ 排序后再拼，结果确定
+keys := make([]string, 0, len(s.CookieMap))
+for k := range s.CookieMap { keys = append(keys, k) }
+sort.Strings(keys)
+```
+
+> [!WARNING]
+> 跨语言边界的字符串必须**保证确定性**。除了 map 顺序，还要提防浮点格式化、时间格式、
+> JSON 字段顺序（`encoding/json` 对 struct 是稳定的，对 map 不是）。
+
+**附带教训：短期令牌 ≠ 凭证轮转**
+
+即使顺序稳定了，也不要把「任何 Cookie 值变化」当作「凭证轮转」。苹果每次 `/validate`
+都轮换 `X-APPLE-WEBAUTH-TOKEN` / `X-APPLE-WEBAUTH-VALIDATE`，但这既不影响已签发 URL，
+也不影响任何业务能力。判定凭证轮转只能基于**会产生后果的**字段变化。

@@ -16,4 +16,14 @@ interface SyncStateDao {
 
     @Query("DELETE FROM sync_state WHERE `key` = :key")
     suspend fun clearSyncState(key: String)
+
+    /**
+     * Drops every cursor in the table (P2-018).
+     *
+     * `syncToken` / `continuationMarker` are bound to the account that minted them, so they must
+     * not survive a logout — replaying a foreign account's token silently returns someone else's
+     * (or no) records.
+     */
+    @Query("DELETE FROM sync_state")
+    suspend fun clearAll()
 }

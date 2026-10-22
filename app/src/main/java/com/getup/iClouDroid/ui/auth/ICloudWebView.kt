@@ -142,17 +142,79 @@ data class CookieValidationResult(
 }
 
 /**
- * Lets the host screen pull the cookies currently held by the live WebView on demand
- * (used by the in-app diagnostic panel and by automated verification).
+ * Library size scraped from the iCloud landing page (P2-016).
+ *
+ * CloudKit's cursor API never reports a total, so this is the only way to give the scan progress
+ * bar a denominator. [total] is 0 when nothing could be read.
+ *
+ * Deliberately approximate: the web page counts differently from `CPLAsset` records (hidden
+ * items, orphan masters, Live Photo composition). It is only ever used for the progress bar.
+ */
+data class PhotoCounts(val photos: Int, val videos: Int) {
+    val total: Int get() = photos + videos
+}
+
+/**
+ * Parses the JSON that the count-scraping snippet returns.
+ *
+ * `evaluateJavascript` hands back a *doubly* encoded string: the script returns a JSON string,
+ * and WebView wraps that in another JSON layer (so `null` arrives as the literal `"null"`).
+ * Every malformed shape maps to `null` so the caller degrades silently.
+ */
+internal fun parsePhotoCounts(raw: String?): PhotoCounts? {
+    if (raw.isNullOrBlank() || raw == "null" || raw == "\"null\"") return null
+    return try {
+        // Strip the outer JSON string quoting if present.
+        val inner = if (raw.startsWith("\"") && raw.endsWith("\"")) {
+            org.json.JSONTokener(raw).nextValue() as? String ?: return null
+        } else {
+            raw
+        }
+        val obj = org.json.JSONObject(inner)
+        val photos = obj.optInt("photos", 0)
+        val videos = obj.optInt("videos", 0)
+        if (photos <= 0 && videos <= 0) null else PhotoCounts(photos, videos)
+    } catch (e: Exception) {
+        null
+    }
+}
+
+/**
+ * Lets the host screen pull data out of the live WebView on demand.
+ *
+ * Used by the in-app diagnostic panel, by automated verification, and — for [readCounts] — to
+ * grab the library size off the landing page before the WebView is torn down.
  */
 class CookieProbe {
     private var extractor: (() -> CookieValidationResult)? = null
+    private var countsReader: ((callback: (PhotoCounts?) -> Unit) -> Unit)? = null
 
     internal fun bind(block: () -> CookieValidationResult) {
         extractor = block
     }
 
+    internal fun bindCountsReader(block: (callback: (PhotoCounts?) -> Unit) -> Unit) {
+        countsReader = block
+    }
+
     fun extract(): CookieValidationResult? = extractor?.invoke()
+
+    /**
+     * Reads the photo/video counts off the currently loaded iCloud page.
+     *
+     * **Asynchronous by necessity.** `WebView.evaluateJavascript` delivers its result on the main
+     * thread, so a synchronous read from a main-thread caller (which is exactly where
+     * `forceExtractCookies()` runs) would deadlock on a latch. The callback is invoked with
+     * `null` when nothing could be read — the caller is expected to degrade silently.
+     */
+    fun readCounts(callback: (PhotoCounts?) -> Unit) {
+        val reader = countsReader
+        if (reader == null) {
+            callback(null)
+        } else {
+            reader(callback)
+        }
+    }
 }
 
 @SuppressLint("SetJavaScriptEnabled")
@@ -204,6 +266,33 @@ fun ICloudWebView(
                         CookieValidationResult.validate(raw).also { it.logToLogcat(pageUrl) }
                     }
                     probe?.bind(extractNow)
+
+                    // Scrapes the library size off the landing page ("13,689 张照片, 2,247 个视频").
+                    //
+                    // `evaluateJavascript` runs through the WebView bridge, so unlike injected
+                    // <script> it is not blocked by the page's CSP. Every failure mode (page not
+                    // settled, Apple changed the copy, JS threw) collapses to `null`, which the
+                    // caller treats as "total unknown" and simply shows an indeterminate bar.
+                    probe?.bindCountsReader { callback ->
+                        val js = """
+                            (function () {
+                              try {
+                                var t = document.body ? document.body.innerText : "";
+                                var p = t.match(/([\d,]+)\s*张照片/);
+                                var v = t.match(/([\d,]+)\s*个视频/);
+                                if (!p && !v) return null;
+                                return JSON.stringify({
+                                  photos: p ? parseInt(p[1].replace(/,/g, ""), 10) : 0,
+                                  videos: v ? parseInt(v[1].replace(/,/g, ""), 10) : 0
+                                });
+                              } catch (e) { return null; }
+                            })()
+                        """.trimIndent()
+
+                        evaluateJavascript(js) { raw ->
+                            callback(parsePhotoCounts(raw))
+                        }
+                    }
 
                     webChromeClient = object : WebChromeClient() {
                         override fun onProgressChanged(view: WebView?, newProgress: Int) {

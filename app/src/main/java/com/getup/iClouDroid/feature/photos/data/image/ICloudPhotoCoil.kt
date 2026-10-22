@@ -9,11 +9,16 @@ import coil.key.Keyer
 import coil.request.ErrorResult
 import coil.request.ImageResult
 import coil.request.Options
+import com.getup.iClouDroid.BuildConfig
 import com.getup.iClouDroid.data.session.SessionManager
 import com.getup.iClouDroid.di.AppContainer
 import com.getup.iClouDroid.feature.photos.data.PhotoRepository
 import com.getup.iClouDroid.feature.photos.data.RefreshedUrls
 import com.getup.iClouDroid.feature.photos.data.db.PhotoAssetEntity
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 import java.net.URL
 
 data class ICloudImageModel(
@@ -81,10 +86,20 @@ internal object ImageLoadFailure {
 /**
  * Resolves and, when needed, re-mints iCloud CDN download URLs before Coil executes a request.
  *
- * Two invalidation signals are honoured (P2-005):
- *  1. **Session generation** — a rebuilt Go session mints brand-new signatures, invalidating every
- *     previously stored URL within seconds. Time-based expiry alone cannot detect this.
- *  2. **Age** — CDN signatures expire roughly an hour after issue.
+ * Invalidation signals, in order of what actually causes a dead link:
+ *
+ *  1. **Age** — the dominant factor. **Measured on device** (SM-F9760, see
+ *     `.artifacts/url_lifetime_experiment.md`): a `thumbUrl` returns `206` at 882s (14.7 min) and
+ *     `410` at 1065s (17.75 min). So the real lifetime is ~15–18 minutes, not the "1–2 hours"
+ *     the earlier docs claimed. [URL_MAX_AGE_MS] is therefore set to 12 min: comfortably inside
+ *     the observed window, so we re-mint proactively instead of waiting for a 410.
+ *
+ *  2. **Session generation** — *not* a validity signal on its own. The same experiment showed a
+ *     URL minted under generation N still returning `206` after a full session rebuild into
+ *     N+1, so generation is now bumped only when credentials are genuinely dead (`force` rebuild
+ *     or 401/421 recovery). It remains useful for the account-switch case (P2-018), where the
+ *     `recordName` itself no longer belongs to the current account — and there a *matching*
+ *     generation must still refresh because the row is from a different library entirely.
  *
  * On top of the proactive check, any failed load (403/410 or otherwise) triggers exactly one
  * refresh-and-retry, so we are never silently stuck on a dead link.
@@ -104,23 +119,46 @@ class ICloudPhotoInterceptor(
         val stableKey = "icloud_${data.recordName}_${data.quality.name.lowercase()}"
         val currentGeneration = sessionManager.getSessionGeneration()
         val generationStale = data.sessionGeneration != currentGeneration
-        val ageStale = System.currentTimeMillis() - data.fetchedAt > URL_MAX_AGE_MS
+        val ageMs = System.currentTimeMillis() - data.fetchedAt
+        val ageStale = ageMs > URL_MAX_AGE_MS
+
+        // P2-019: a generation mismatch alone is NOT a reason to re-mint. Measured on device, a
+        // URL minted under generation N still returned 206 after a full rebuild into N+1 — the
+        // CDN signature is bound to the record, not to the session. Keying purely on generation
+        // meant every genuine rebuild (`force` on auth recovery) re-fetched every visible
+        // thumbnail, which is the actual mechanism behind the P2-008 refresh storm.
+        //
+        // It is still a *hint* though, and a cheap one: if the session changed, the row may come
+        // from an entirely different account (P2-018), where re-minting against the new session
+        // is the only way to discover the record is foreign. So a mismatch shortens the tolerated
+        // age to half. That keeps the cross-account case responsive without paying a lookup per
+        // cell on every ordinary rebuild.
+        val generationStaleAndAging = generationStale && ageMs > URL_MAX_AGE_MS / 2
 
         var activeUrl = data.url
         var refreshedProactively = false
 
-        Log.d(
-            TAG,
-            "load ${data.recordName} quality=${data.quality} " +
-                "hasUrl=${!activeUrl.isNullOrBlank()} ageStale=$ageStale genStale=$generationStale"
-        )
+        // NOTE: this interceptor runs for every visible cell, on the caller's dispatcher, and a
+        // cold start fires ~24 of them back to back. Verbose per-image logging here cost real
+        // main-thread time (Logcat is an IPC), so the happy path stays silent unless the
+        // request needed network work.
+        if (BuildConfig.DEBUG && (activeUrl.isNullOrBlank() || ageStale || generationStale)) {
+            Log.d(
+                TAG,
+                "load ${data.recordName} quality=${data.quality} " +
+                    "hasUrl=${!activeUrl.isNullOrBlank()} ageMs=$ageMs ageStale=$ageStale " +
+                    "genStale=$generationStale"
+            )
+        }
 
-        if (activeUrl.isNullOrBlank() || ageStale || generationStale) {
+        if (activeUrl.isNullOrBlank() || ageStale || generationStaleAndAging) {
             val fresh = refresh(data)
             if (fresh != null) {
                 activeUrl = pickFreshUrl(data, fresh)
                 refreshedProactively = true
-                Log.d(TAG, "refreshed ${data.recordName} -> host=${hostOf(activeUrl)}")
+                if (BuildConfig.DEBUG) {
+                    Log.d(TAG, "refreshed ${data.recordName} -> host=${hostOf(activeUrl)}")
+                }
             }
         }
 
@@ -144,7 +182,7 @@ class ICloudPhotoInterceptor(
                     }
                 }
             }
-            else -> Log.d(TAG, "ok ${data.recordName} quality=${data.quality}")
+            else -> Unit // happy path: no log, keeps the first-screen burst quiet
         }
 
         return result
@@ -162,9 +200,10 @@ class ICloudPhotoInterceptor(
             .build()
     }
 
-    private suspend fun refresh(data: ICloudImageModel): RefreshedUrls? {
+    private suspend fun refresh(data: ICloudImageModel): RefreshedUrls? = refreshGate.withPermit {
+        // Bound the burst: a generation bump makes every visible cell stale at once.
         val result = repository.refreshUrlsForMaster(data.masterId)
-        return result.getOrNull().also {
+        result.getOrNull().also {
             if (it == null) {
                 Log.w(
                     TAG,
@@ -189,7 +228,36 @@ class ICloudPhotoInterceptor(
 
     companion object {
         private const val TAG = "ICloudPhotoCoil"
-        private const val URL_MAX_AGE_MS = 45 * 60 * 1000L
+
+        /**
+         * How old a stored `downloadURL` may be before it is proactively re-minted.
+         *
+         * Chosen from measurement, not guesswork. Probing a real `thumbUrl` every 3 minutes on a
+         * physical device (see `.artifacts/url_lifetime_experiment.md`):
+         *
+         * | age | status |
+         * | --- | --- |
+         * | 701s (11.7m) | 206 |
+         * | 882s (14.7m) | 206 |
+         * | 1065s (17.8m) | 410 |
+         *
+         * So the true lifetime is ~15–18 minutes. 12 minutes sits inside that window with a few
+         * minutes of headroom for clock skew and slow networks, while still being short enough
+         * that a thumbnail is refreshed *before* the CDN starts refusing it. The 45-minute value
+         * this replaced was inherited from the (incorrect) "1–2 hour" assumption and left a
+         * ~30 minute blind spot where every load had to fail once before recovering.
+         */
+        private const val URL_MAX_AGE_MS = 12 * 60 * 1000L
+
+        /**
+         * Caps how many URL re-mints run at once.
+         *
+         * When the session generation bumps, every visible thumbnail is stale at the same time,
+         * so a cold start used to fire ~24 `/records/lookup` calls concurrently and re-mint them
+         * all on the main thread's tick, dropping ~40+ frames. The repository already coalesces
+         * duplicate lookups; this bounds the burst so the first screen stays responsive.
+         */
+        private val refreshGate = Semaphore(permits = 3)
     }
 }
 
@@ -223,4 +291,51 @@ object ICloudImageLoaderFactory {
             loader
         }
     }
+
+    /**
+     * Builds the loader and touches its disk cache ahead of first use.
+     *
+     * `DiskLruCache.initialize()` scans the journal under a monitor. When the first grid frame
+     * requests ~24 thumbnails at once they all queue behind that lock (measured 160ms of monitor
+     * contention), which shows up as dropped frames on a cold start. Calling this from
+     * `Application.onCreate` on a background dispatcher pays the cost before the grid exists.
+     *
+     * Must be called off the main thread. Best effort: failures are ignored by the caller.
+     */
+    @OptIn(coil.annotation.ExperimentalCoilApi::class)
+    suspend fun warmUp(context: Context, container: AppContainer) {
+        val loader = get(context, container)
+        loader.diskCache?.openSnapshot("__warmup__")?.close()
+    }
+
+    /**
+     * Drops every cached image byte, memory and disk (P2-018).
+     *
+     * Cache keys are `icloud_{recordName}_{quality}` — stable by design (AGENTS §6.3), which also
+     * means they are **account-scoped without saying so**: the same key in a later session points
+     * at a `recordName` that either does not exist or belongs to a different account, and the
+     * bytes on disk were fetched with a signature that has since died. That is why a stale
+     * `image_cache/` shows the old account's thumbnails even when the DB was cleared.
+     *
+     * Only clears caches; the loader instance and its interceptor wiring survive, so the next
+     * login reuses the same singleton (`warmUp` already opened the disk cache and it stays warm).
+     *
+     * @return true when both caches were cleared without an exception.
+     */
+    @OptIn(coil.annotation.ExperimentalCoilApi::class)
+    suspend fun clearCaches(context: Context, container: AppContainer): Boolean =
+        withContext(Dispatchers.IO) {
+            try {
+                val loader = get(context, container)
+                loader.memoryCache?.clear()
+                loader.diskCache?.clear()
+                Log.i(TAG, "Coil memory + disk caches cleared")
+                true
+            } catch (e: Exception) {
+                Log.e(TAG, "Coil cache clear failed", e)
+                false
+            }
+        }
+
+    private const val TAG = "ICloudPhotoCoil"
 }

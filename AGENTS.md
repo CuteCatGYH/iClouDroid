@@ -99,8 +99,17 @@ Android 层细分见第 10 节。
    - `X-APPLE-WEBAUTH-PCS-CloudKit`
 3. **Cookie 跨子域手动注入**：
    不要依赖 `cookiejar` 自动匹配。`golang.org/x/net/publicsuffix` 会把 `com.cn` 视为公共后缀，**拒绝**向父域下发 Cookie；且 CloudKit 节点 (`pXX-ckdatabasews.icloud.com.cn`) 与对象存储 (`cvws.icloud-content.com.cn`) 属不同子域。必须由 `Session.CookieMap` 在 `NewRequest` 中显式拼装 `Cookie` Header。
-4. **下载直链是易碎品**：
-   `cvws.icloud-content.com[.cn]` 返回的 URL 带一次性签名，**会话重建即失效**（可能只隔 10 秒），并非固定 1 小时。任何使用 URL 的路径均须具备刷新能力，详见第 6 节。
+4. **下载直链的寿命由时间决定，与代际无关（已实测）**：
+   `cvws.icloud-content.com[.cn]` 返回的 URL 实测寿命约 **15~18 分钟**（物理机实测：
+   882s 仍 200，1065s 变 410），**不是** “固定的 1~2 小时”。
+
+   > [!CAUTION]
+   > **「会话重建导致 URL 失效」是已被证伪的假设。** 实测：gen=6 签发的 URL 在会话重建到
+   > gen=7 之后仍然返回 `200`。CDN 签名绑定的是 record，不是签发它的会话。
+   > 详见 [ISS-026](CHANGELOG_ISSUES.md#iss-026) 与
+   > [url_lifetime_experiment.md](.artifacts/url_lifetime_experiment.md)。
+
+   因此 URL 刷新只由**年龄**和**真实失败（403/410）**驱动，不靠代际。详见第 6 节。
 
 ---
 
@@ -132,6 +141,15 @@ val hasActiveSession = summaryJson.optBoolean("hasAuthToken", false) &&
 
 **只能在 `initSession` 真正成功后**递增。绝不可以在「会话已就绪」的快速路径上调用 —— 该路径每次 API 请求都会经过，会让 generation 每几十毫秒 +1，导致每一格缩略图都变成「代际过期」并各发一次 `/records/lookup`（即 URL 刷新洪泛）。
 
+> [!NOTE]
+> **已修复（[ISS-026](CHANGELOG_ISSUES.md#iss-026)）**：此前 `applyRefreshedCookies()` 用**字符串相等**
+> 判断凭证是否轮转，而 Go 的 `BuildCookieHeader()` 遍历 `map` 拼接 Cookie（顺序随机），
+> 导致每次冷启动都 bump 一次 generation。现已 Go 侧按 key 排序 + Kotlin 侧改集合比较。
+>
+> 更重要的是：**代际 bump 不再由 Cookie 变化触发。** 实测发现苹果每次 `/validate` 都会轮换
+> `X-APPLE-WEBAUTH-TOKEN` / `X-APPLE-WEBAUTH-VALIDATE`，而这两个令牌与已签发 URL 的有效性无关。
+> 现在只有 `force = true`（401/421 恢复路径）才会 bump。
+
 ### 5.4 会话代际机制
 
 | 角色 | 字段 | 说明 |
@@ -144,6 +162,56 @@ val hasActiveSession = summaryJson.optBoolean("hasAuthToken", false) &&
 > [!CAUTION]
 > 刷新成功后**必须把当前 generation 回写到该行**，否则它永远停留在 stale 状态，每次加载都重复刷新。
 
+### 5.5 换区 / 换账号必须清空数据层
+
+会话层清理（Cookie / WebStorage / `EncryptedSharedPreferences`）**远不够**。
+Room 照片表与 Coil 缓存都以 `recordName` 为主键，而这些 ID 属于特定账号：
+
+| 数据 | 位置 | 是否账号相关 |
+| --- | --- | --- |
+| `photo_assets` | `PhotoDatabase` | ✅ CloudKit 记录 ID |
+| `sync_state` | `PhotoDatabase` | ✅ `syncToken` / `continuationMarker` |
+| 图片字节 | Coil `DiskLruCache` | ✅ 来自旧账号的 `cvws` 直链 |
+
+新账号登录后会 `bumpSessionGeneration()`，旧行全部 stale → 首屏批量刷新，
+但用的是**新账号 Cookie** 去查**旧账号 recordName**，必然失败，表现为
+「列表有内容但图片全部加载失败」。
+
+**当前状态**（已修复，详见 [ISS-025](CHANGELOG_ISSUES.md#iss-025)）：
+
+`logout()` 已改为完整四阶段清洗，顺序固定不可调换：
+
+1. **阻断** `PhotoRepository.beginWipe()` —— 置 `isWiping = true`，所有网络入口
+   （`checkZoneReady` / `fetchInitialPage` / `fetchNextPage` / `syncIncremental` /
+   `refreshUrlsForMaster(s)`）与 `PhotoRemoteMediator.load()` 立即拒绝工作
+2. **数据层** `wipeAllData()` —— `sync_state` + `photo_assets` 全清，并清理刷新去重缓存
+3. **图片层** `ICloudImageLoaderFactory.clearCaches()` —— Coil 内存 + 磁盘
+4. **会话层** `clearWebViewCookies()`（桥接回调后 `flush()`）+ `sessionManager.clearSession()`
+   最后 `endWipe()` 释放守卫。
+
+修改 `logout()` 时注意：
+
+1. **先阻断再清库** —— 否则正在飞行中的 `RemoteMediator` APPEND 会 `upsertAll()`
+   把已删的行写回。
+2. **不能以 `isWiping` 之外的任何方式抑制同步** —— 用同步布尔哨兵位，
+   不用 Flow/State（异步会竞态，见 [docs/PITFALLS.md](docs/PITFALLS.md) §7）。
+3. **顺序：阻断 → 数据层 → Coil → 会话层** —— 先清 Cookie 会让中途的自动刷新
+   拿空 Cookie 打 Apple 接口；先清数据层再阻断则会被写回。
+4. **`removeAllCookies` 必须等回调** —— 传 `null` 只是放弃回调，并不代表已同步完成，
+   紧接着的 `flush()` 可能把删除前的 jar 落盘。
+5. **`AuthViewModel.isLoggingOut` 必须从 `logout()` 第一行就开始生效** ——
+   `ICloudWebView` 的 Cookie 探针会在 `removeAllCookies` 完成前读到旧 Cookie
+   并回调 `onCookiesExtracted()`，把刚销毁的会话重新持久化。
+   `AuthUiState` **挡不住**这个竞态（`logout()` 第一时间就置为 `NotLoggedIn`，
+   反而放行了回调），必须用 `@Volatile` 布尔位，并在清理完成后再保留
+   `COOKIE_CAPTURE_GRACE_MS`（800ms）等登录页彻底重载。见
+   [ISS-025](CHANGELOG_ISSUES.md#iss-025) 的“竞态”小节。
+
+> [!CAUTION]
+> **新增任何「退出登录时需要清理的状态」，同时必须检查它能不能被异步回调写回。**
+> 本项目已验证的写回路径有两条：`PhotoRemoteMediator.load()` → `upsertAll()`，
+> 以及 `ICloudWebView` 的 Cookie 探针 → `onCookiesExtracted()` → `saveSession()`。
+
 ---
 
 ## 6. URL 生命周期与刷新规范
@@ -152,10 +220,25 @@ val hasActiveSession = summaryJson.optBoolean("hasAuthToken", false) &&
 
 | 路径 | 事前检查 | 失败后重试 | 重试上限 |
 | --- | --- | --- | --- |
-| Coil 缩略图 | 代际 / 45min 年龄 | `ErrorResult` → 刷新重请 | 1 |
+| Coil 缩略图 | **年龄 12min**（+ 代际仅作提示） | `ErrorResult` → 刷新重请 | 1 |
 | 图片详情 | — | `onError` → 刷新 → `reloadToken++` | 2 |
 | 视频播放 | — | 重建 `ExoPlayer` + `seekTo(lastPosition)` | 2 |
-| 相册下载 | 代际 / 年龄 | HTTP 403/410 捕获后换链 | 1 |
+| 相册下载 | 年龄 | HTTP 403/410 捕获后换链 | 1 |
+
+### 6.1.1 阈值必须来自实测，不要猜
+
+| 常量 | 值 | 依据 |
+| --- | --- | --- |
+| `URL_MAX_AGE_MS` | **12 分钟** | 实测 882s(14.7m) 仍 206，1065s(17.8m) 变 410 |
+
+> [!CAUTION]
+> **不要把这个值调回 45 分钟。** 旧值基于「1~2 小时」的错误假设，留下约 30 分钟的盲区：
+> URL 早已 410，系统却仍以为有效，只能靠失败重试兜底。
+> 若苹果将来改变寿命，用 [实测脚本](.artifacts/url_lifetime_experiment.md) 重新标定，别拍脑袋。
+
+**代际（`sessionGeneration`）的定位已降级**：它不再是刷新触发器。
+实测已证 URL 跨会话重建仍有效，因此在拦截器里只有「代际不符 **且** 年龄过半」才提前刷新 ——
+这是为换账号场景（[P2-018](CHANGELOG_ISSUES.md#iss-025)）留的加速信号，不是常规路径。
 
 ### 6.2 刷新必须走 `PhotoRepository`，禁止直调 Go
 

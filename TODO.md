@@ -85,6 +85,8 @@
 - [x] **HDR gain map HEIC 解码失败 + 解码失败误触发刷新** ✅（`ImageDecoderDecoder` + `force` 刷新通道，详见 [ISS-023](CHANGELOG_ISSUES.md#iss-023-hdr-gain-map-heic-解码失败--解码失败误触发-url-刷新)）
 - [x] **Go 层 `time.Now()` 作排序键兜底** ✅（改为稳定 `0`，避免照片位置漂移）
 - [x] **排序键不稳定** ✅（`ORDER BY assetDate DESC, id ASC` + 复合索引）
+- [x] **退出登录不清洗数据层（P2-018）** ✅（`logout()` 四阶段清洗：阻断 → Room → Coil → Cookie/Vault，并修复 `removeAllCookies` 未等回调就 `flush()` 的缺陷，详见 [ISS-025](CHANGELOG_ISSUES.md#iss-025)）
+- [x] **Cookie 顺序抖动 + 错误失效假设（P2-019）** ✅（Go 侧 `BuildCookieHeader` 排序 + Kotlin 侧集合比较；实测推翻「会话重建即失效」，URL 真实寿命 ~15-18 分钟而非 1-2 小时，`URL_MAX_AGE_MS` 45min→12min，代际不再由 Cookie 变化触发 bump。详见 [ISS-026](CHANGELOG_ISSUES.md#iss-026)）
 - [ ] **⚠️ 深翻页跳顶（P2-016）** — `RemoteMediator` 每次 APPEND 必 invalidate，属 Paging 3 架构性行为。当前为缓解态（`initialLoadSize=1200`），**根治待 UI 重构时一并解决**（详见 [ISS-021](CHANGELOG_ISSUES.md#iss-021-remotemediator-每次-append-必-invalidate导致深翻页跳顶)）
 
 #### 架构重构：多功能 iCloud 客户端演进 (全功能 App 骨架) ✅
@@ -105,7 +107,15 @@
 | `Choreographer: Skipped` | **无** |
 | 滚动中 `itemCount` 塌陷 | **0 次**（index 平滑至 336，itemCount 稳定 1200） |
 | `go test ./...` | **ok** |
-| `testDebugUnitTest` | **11 passed, 0 failed** |
+| `testDebugUnitTest` | **26 passed, 0 failed**（P2-019 新增 15 项） |
+
+**P2-019 修复后补充验证**（物理机 SM-F9760）：
+
+| 指标 | 结果 |
+| --- | --- |
+| 冷启动 + 强制重建的 generation bump | **0 次**（修复前每次 +1） |
+| 首屏 + 滚动 3 屏的 Coil 加载失败 | **0 次** |
+| 42 分钟老 URL | 主动 `refreshed` 换链，无需等 410 |
 
 ### Phase 3: Android 本地相册自动备份 (增量上传)
 
@@ -120,11 +130,11 @@
   - [ ] 周期性任务 + `ContentObserver` 触发器（仅 Wi-Fi / 充电时 / 电量充足）
   - [ ] `ForegroundService (dataSync)` 通知栏展示进度与异常重试
 
-### Phase 4: 跨生态深度适配 (三星 + 苹果痛点打磨)
+### Phase 4: 跨生态深度适配 (安卓 + 苹果痛点打磨)
 
 - [ ] **Motion Photo ↔ Live Photo 互转**
-  - [ ] **上传（三星 → iCloud）**：检测 `MotionPhoto_Data` / `MicroVideoOffset` XMP 标签，剥离尾部 MP4 → `MediaMuxer`/`FFmpeg` 转 `.MOV`，写入 `com.apple.quicktime.content.identifier` UUID，JPEG 注入匹配 `MakerApple` ContentIdentifier
-  - [ ] **下载（iCloud → 三星）**：`CPLMaster` 含 `resOriginalVidComplRes` 时同时下载图+视频，按三星/Google Motion Photo 规范拼接单文件并写 XMP 偏移量
+  - [ ] **上传（安卓 → iCloud）**：检测 `MotionPhoto_Data` / `MicroVideoOffset` XMP 标签，剥离尾部 MP4 → `MediaMuxer`/`FFmpeg` 转 `.MOV`，写入 `com.apple.quicktime.content.identifier` UUID，JPEG 注入匹配 `MakerApple` ContentIdentifier
+  - [ ] **下载（iCloud → 安卓）**：`CPLMaster` 含 `resOriginalVidComplRes` 时同时下载图+视频，按三星/Google Motion Photo 规范拼接单文件并写 XMP 偏移量
 - [ ] **折叠屏与大屏自适应布局**
   - [ ] `WindowSizeClass` 适配：外屏单栏底部导航 / 内屏与平板 `NavigationRail` + 双栏详情
 

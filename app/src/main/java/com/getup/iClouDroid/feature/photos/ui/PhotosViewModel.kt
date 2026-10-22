@@ -7,17 +7,21 @@ import android.util.Log
 import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.paging.PagingData
-import androidx.paging.cachedIn
 import com.getup.iClouDroid.IClouDroidApp
 import com.getup.iClouDroid.feature.photos.data.MediaStoreDownloader
+import com.getup.iClouDroid.feature.photos.data.MonthScanEngine
+import com.getup.iClouDroid.feature.photos.data.ScanProgress
 import com.getup.iClouDroid.feature.photos.data.db.PhotoAssetEntity
+import com.getup.iClouDroid.feature.photos.data.db.PhotoMonthIndexEntity
+import com.getup.iClouDroid.feature.photos.work.ScanScheduler
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -29,15 +33,45 @@ sealed interface DownloadState {
     data class Error(val message: String) : DownloadState
 }
 
+/**
+ * State of the gallery as a whole.
+ *
+ * [months] is the *index* — a few hundred rows at most — not the photos. Each month's contents are
+ * subscribed separately by the UI so a 16k-item library never materialises at once.
+ */
+data class GalleryUiState(
+    val months: List<PhotoMonthIndexEntity> = emptyList(),
+    val totalCount: Int = 0,
+    val isRefreshing: Boolean = false,
+    val errorMessage: String? = null
+)
+
 class PhotosViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val repository = (application as IClouDroidApp).container.photoRepository
+    private val container = (application as IClouDroidApp).container
+    private val repository = container.photoRepository
+    private val scanEngine = container.monthScanEngine
 
-    val photosPagingData: Flow<PagingData<PhotoAssetEntity>> = repository.photoPagingFlow
-        .cachedIn(viewModelScope)
+    /**
+     * Month sections, newest first.
+     *
+     * P2-016: this is the scroll anchor. Previously the grid was driven by `PagingData`, whose
+     * `PagingSource` was invalidated after every APPEND — collapsing `itemCount` and clamping the
+     * scroll position. A month key does not change when rows are appended, so there is nothing to
+     * clamp.
+     */
+    val monthIndex: StateFlow<List<PhotoMonthIndexEntity>> = repository.monthIndexFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val totalCount: StateFlow<Int> = repository.totalCountFlow
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+
+    /** Live scan progress: drives the bar and the "scanned so far" text. */
+    val scanProgress: StateFlow<ScanProgress> = scanEngine.progress
+
+    val galleryState: StateFlow<GalleryUiState> = monthIndex
+        .map { GalleryUiState(months = it) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), GalleryUiState())
 
     private val _gridColumns = MutableStateFlow(4)
     val gridColumns: StateFlow<Int> = _gridColumns.asStateFlow()
@@ -54,18 +88,56 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
     private val _downloadState = MutableStateFlow<DownloadState>(DownloadState.Idle)
     val downloadState: StateFlow<DownloadState> = _downloadState.asStateFlow()
 
-    private var hasAutoSynced = false
+    private var hasAutoStarted = false
+    private var scanJob: Job? = null
 
     init {
         viewModelScope.launch {
-            repository.totalCountFlow.collect { currentCount ->
-                if (currentCount == 0 && !hasAutoSynced && !_isSyncing.value) {
-                    hasAutoSynced = true
-                    syncPhotos(isInitial = true)
+            // Restore the persisted estimate first so the progress bar has a denominator even
+            // before this run produces any progress of its own.
+            scanEngine.restoreProgress()
+
+            // Bucket any rows left over from a v3→v4 upgrade (or an interrupted scan) before the
+            // UI reads the index. Without this an upgraded install shows a populated count but an
+            // empty gallery, because `photo_assets` has rows while `photo_month_index` has none.
+            scanEngine.ensureMonthIndexUpToDate()
+
+            // Start the scan whenever it is not already finished — NOT only when the library is
+            // empty.
+            //
+            // The original condition was `currentCount == 0`, which is wrong for the v3→v4
+            // upgrade: an existing install has rows but no `yearMonth` and no month index, so the
+            // gallery renders empty while the count reads 50. It also silently skipped resuming an
+            // interrupted scan (a killed app leaves a partial library behind).
+            repository.totalCountFlow.collect { _ ->
+                if (!hasAutoStarted && !_isSyncing.value) {
+                    hasAutoStarted = true
+                    startInitialLoad()
                 }
             }
         }
     }
+
+    /**
+     * Hands the scan off to WorkManager when the screen goes away.
+     *
+     * The foreground scan runs in `viewModelScope`, which is cancelled with the screen. Leaving it
+     * at that means a user who switches apps mid-scan comes back to a partially populated gallery
+     * and no indication anything is still pending. `ScanScheduler` uses `KEEP`, so this never
+     * duplicates an already-queued job, and the engine's mutex stops it from racing the foreground
+     * path.
+     */
+    fun onScreenLeaving() {
+        if (scanEngine.progress.value.isComplete) {
+            ScanScheduler.cancel(getApplication<Application>())
+            return
+        }
+        ScanScheduler.ensureScheduled(getApplication<Application>())
+    }
+
+    /** Photos of one month, newest first. Consumers subscribe per month as it scrolls into view. */
+    fun observeMonth(yearMonth: Int): Flow<List<PhotoAssetEntity>> =
+        repository.observeMonth(yearMonth)
 
     fun setGridColumns(columns: Int) {
         _gridColumns.value = columns.coerceIn(2, 6)
@@ -85,14 +157,19 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
         _downloadState.value = DownloadState.Idle
     }
 
-    fun syncPhotos(isInitial: Boolean = false) {
+    /**
+     * First load: verify the zone, then walk the library into month sections.
+     *
+     * The walk is resumable and idempotent, so calling this after an interruption picks up where
+     * it stopped rather than starting over.
+     */
+    private fun startInitialLoad() {
         if (_isSyncing.value) return
         _isSyncing.value = true
-        _syncMessage.value = if (isInitial) "正在连接 iCloud 照片库..." else "正在检查增量更新..."
+        _syncMessage.value = "正在连接 iCloud 照片库..."
 
-        viewModelScope.launch {
+        scanJob = viewModelScope.launch {
             try {
-                // 1. Verify PrimarySync zone is ready
                 val zoneReady = repository.checkZoneReady()
                 if (zoneReady.isFailure) {
                     val err = zoneReady.exceptionOrNull()?.message ?: "PrimarySync 分区未就绪"
@@ -101,10 +178,69 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
                     return@launch
                 }
 
-                // 2. Fetch changes or initial page
+                _syncMessage.value = "正在扫描照片库..."
+
+                // Observe progress while the scan runs, so the banner tracks it.
+                val progressJob = launch {
+                    scanEngine.progress.collect { p ->
+                        if (p.isScanning) {
+                            _syncMessage.value = buildProgressMessage(p)
+                        }
+                    }
+                }
+
+                val result = scanEngine.scanAll()
+                progressJob.cancel()
+
+                if (result.isSuccess) {
+                    val progress = scanEngine.progress.value
+                    // Tell the truth about what just happened. `scanAll` returns success even when
+                    // it stopped early (wipe in progress, unrecoverable session, exhausted
+                    // retries) with the cursor preserved for the next attempt — claiming
+                    // "扫描完成" there was actively misleading over a half-scanned library.
+                    _syncMessage.value = if (progress.isComplete) {
+                        "扫描完成，共 ${progress.scanned} 项"
+                    } else {
+                        "已扫描 ${progress.scanned} 项，稍后自动继续"
+                    }
+                    Log.i(TAG, "Scan finished, complete=${progress.isComplete}, scanned=${progress.scanned}")
+                } else {
+                    val err = result.exceptionOrNull()?.message ?: "扫描出现异常"
+                    _syncMessage.value = "扫描失败: $err"
+                    Log.w(TAG, "scanAll failed: $err")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "initial load exception", e)
+                _syncMessage.value = "异常: ${e.message}"
+            } finally {
+                _isSyncing.value = false
+            }
+        }
+    }
+
+    /**
+     * Manual sync: pull incremental changes on top of the already-scanned library.
+     *
+     * Uses the `syncToken` from `/records/changes` rather than re-walking the cursor, so a refresh
+     * is cheap. Falls back to the full scan when no token exists yet.
+     */
+    fun syncPhotos(isInitial: Boolean = false) {
+        if (_isSyncing.value) return
+        _isSyncing.value = true
+        _syncMessage.value = if (isInitial) "正在连接 iCloud 照片库..." else "正在检查增量更新..."
+
+        viewModelScope.launch {
+            try {
+                val zoneReady = repository.checkZoneReady()
+                if (zoneReady.isFailure) {
+                    val err = zoneReady.exceptionOrNull()?.message ?: "PrimarySync 分区未就绪"
+                    _syncMessage.value = "错误: $err"
+                    return@launch
+                }
+
                 val syncResult = if (isInitial) {
-                    _syncMessage.value = "正在拉取照片列表..."
-                    repository.fetchInitialPage(limit = 100)
+                    _syncMessage.value = "正在扫描照片库..."
+                    scanEngine.scanAll()
                 } else {
                     _syncMessage.value = "正在同步最新照片变更..."
                     repository.syncIncremental(limit = 100)
@@ -113,11 +249,10 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
                 if (syncResult.isSuccess) {
                     val count = syncResult.getOrDefault(0)
                     _syncMessage.value = "同步完成，新增/更新 $count 项"
-                    Log.i(TAG, "Sync finished successfully, count=$count")
+                    Log.i(TAG, "Sync finished, count=$count")
                 } else {
                     val err = syncResult.exceptionOrNull()?.message ?: "同步出现异常"
                     _syncMessage.value = "同步失败: $err"
-                    Log.w(TAG, "syncPhotos failed: $err")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "syncPhotos exception", e)
@@ -125,6 +260,24 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
             } finally {
                 _isSyncing.value = false
             }
+        }
+    }
+
+    /**
+     * Banner text for a running scan.
+     *
+     * Shows both the concrete position ("3,847 项") and the month currently being written, because
+     * a bare percentage is meaningless while `estimatedTotal` is unknown — and it frequently is,
+     * since CloudKit's cursor never reports a total.
+     */
+    private fun buildProgressMessage(progress: ScanProgress): String {
+        val monthLabel = com.getup.iClouDroid.feature.photos.data.MonthBucketing
+            .labelOf(progress.currentYearMonth)
+        val where = if (progress.currentYearMonth > 0) " · $monthLabel" else ""
+        return if (progress.estimatedTotal > 0) {
+            "正在扫描 ${progress.scanned} / ${progress.estimatedTotal} 项$where"
+        } else {
+            "正在扫描 · 已扫描 ${progress.scanned} 项$where"
         }
     }
 

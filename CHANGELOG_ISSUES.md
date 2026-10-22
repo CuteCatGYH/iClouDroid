@@ -34,7 +34,10 @@
 | [ISS-020](#iss-020-continuationmarker-失效后仍被重放引发-401--重建死循环) | `continuationMarker` 失效后仍被重放，引发 401 → 重建死循环 | 🔴 P0 | Android / Repository | ✅ 已修复 |
 | [ISS-021](#iss-021-remotemediator-每次-append-必-invalidate导致深翻页跳顶) | `RemoteMediator` 每次 APPEND 必 invalidate，导致深翻页跳顶 | 🔴 P0 | Android / Paging | ⚠️ 缓解态，根治待 UI 重构 |
 | [ISS-022](#iss-022-冷启动时-login-webview-被提前构造阻塞主线程-33-秒) | 冷启动时 Login WebView 被提前构造，阻塞主线程 ~3.3 秒 | 🟠 P1 | Android / 启动 | ✅ 已修复 |
-| [ISS-023](#iss-023-hdr-gain-map-heic-解码失败--解码失败误触发-url-刷新) | HDR gain map HEIC 解码失败 + 解码失败误触发 URL 刷新 | 🟠 P1 | Android / Coil + Repository | ✅ 已修复 |
+| [ISS-023](#iss-023-hdr-高位深原图无法解码--解码失败误触发-url-刷新) | HDR 高位深原图无法解码 + 解码失败误触发 URL 刷新 | 🟠 P1 | Android / Coil + Repository | ✅ 已修复 |
+| [ISS-024](#iss-024-go-层用-timenow-作排序键兜底导致照片位置持续漂移) | Go 层用 `time.Now()` 作排序键兜底，导致照片位置持续漂移 | 🔴 P0 | Go 核心层 | ✅ 已修复 |
+| [ISS-025](#iss-025-退出登录不清洗照片库与图片缓存导致换区换号后残留脏数据) | 退出登录不清洗照片库与图片缓存，导致换区/换号后残留脏数据 | 🟠 P1 | Android / Session + Storage | ✅ 已修复 |
+| [ISS-026](#iss-026-cookie-序列化顺序抖动与会话重建即失效的错误假设) | Cookie 序列化顺序抖动与「会话重建即失效」的错误假设 | 🟠 P1 | Go / Android 跨语言 | ✅ 已修复 |
 
 ---
 
@@ -1436,48 +1439,187 @@ fun logToLogcat(pageUrl: String?, tag: String = AUTH_LOG_TAG) {
 
 ---
 
-## ISS-023：HDR gain map HEIC 解码失败 + 解码失败误触发 URL 刷新
+## ISS-023：HDR 高位深原图无法解码 + 解码失败误触发 URL 刷新
 
 **优先级**：🟠 P1
-**归属**：`data/coil/ICloudPhotoCoil.kt` / `ui/photos/PhotoDetailViewer.kt` / `PhotoRepository`
+**归属**：`feature/photos/data/image/ICloudPhotoCoil.kt` / `feature/photos/ui/PhotoDetailViewer.kt` / `PhotoRepository`
 **发现时间**：Phase 2 第三轮真机联调
 **对应待办**：P2-010 / P2-011
 
-这两个问题強相关：第一个导致原图打不开，第二个使得“打不开”永远无法自愈、且不断发出无效请求。
+两个问题強相关：第一个导致原图打不开，第二个使得“打不开”永远无法自愈、且不断发出无效请求。
 
-### P2-010 —— 现象与根因
+---
 
-部分照片在详情页显示「图片加载失败」，但网格缩略图完全正常：
+### P2-010 —— 现象
+
+部分照片在详情页显示「图片加载失败」，但：
+
+- 网格缩略图正常
+- 下载正常
+- 拍摄信息（EXIF）正常
+
+用户提供了决定性线索：
+
+> 无法打开的全都是 iPad 的截图。iPad 屏幕捕捉设置为 HDR 就无法查看，改为 SDR 就可以。
+
+---
+
+### P2-010 —— 根因（经字节级分析修正）
+
+**早期结论（已废弃）**：归因为 `ftyp` 的 `MiHE` brand（HDR gain map）。
+
+拿到用户提供的三张 iPad 原始文件后，字节级分析推翻了这一假设：
 
 ```
-19:50:23.285 W ICloudPhotoCoil: fail 801D818D-... quality=ORIGINAL
-    error=BitmapFactory returned a null bitmap. ...not encoded as a valid image format.
-
-19:48:39.451 D ICloudPhotoCoil: ok 801D818D-... quality=THUMB    ← 同一素材缩略图正常
+IMG_1350.PNG: 2732x2048  bitDepth=16  colorType=2 (RGB)   ← HDR 截图
+IMG_1351.PNG: 2732x2048  bitDepth=16  colorType=2 (RGB)
+IMG_1352.HEIC: ftyp heix | mif1 MiHE miaf heix           ← 10-bit HEVC
 ```
 
-排查排除了 URL 过期、OOM、数据不完整等假设，最终对比 `ftyp` 的 compatible brands 找到差异：
+| 格式 | 位深 | Android `BitmapFactory` | `ImageDecoder` | macOS `sips` |
+| --- | --- | --- | --- | --- |
+| PNG `bitDepth=16` | 16-bit | ❌ | ❌ | ✅ |
+| HEVC `heix` Main 10 | 10-bit | ❌ | ⚠️ 部分 | ✅ |
 
-```
-❌ 失败 IMG_1338.HEIC
-    ftyp heic mif1 MiHE miaf heic      ← MiHE = HDR gain map / 多图容器
+**真正的根因是高位深**，`MiHE` 只是伴随特征（Apple 的 HDR 都住这个 brand），并非因果。
 
-✅ 成功 IMG_2049.HEIC
-    ftyp heic mif1 MiPr miaf MiHB heic ← MiHB = 普通 HEVC 主图
-```
+四条排除证据：
 
-**根因**：`BitmapFactory` 遇到带 gain map 辅助图的 HEIF 时返回 null bitmap。
-缩略图不受影响是因为 iCloud 下发的 `resJPEGThumbRes` 是服务端已转码的 JPEG，
-只有 `resOriginalRes` 的原生 HEIC 才带这个 variant。
+1. **数据完好**：`curl` 下载 `HTTP=200`，字节头正常；macOS `sips` 可成功转 JPEG
+2. **与 URL 无关**：SDR 图脏 `genStale=true` 刷新后依旧成功；HDR 图换新 URL 依旧失败
+3. **与尺寸无关**：12MP HEIC 成功、5MP HEIC 失败
+4. **与 `ImageDecoder` 无关**：`ImageDecoderDecoder.Factory()` 已注册且 `.size(2048)` 已加，依旧报 `BitmapFactory` 错误（Coil 回退）
 
-### P2-010 —— 修复
+### 为何缩略图、下载都正常
 
-**1. 加载器改用 `ImageDecoderDecoder`**
+| 路径 | 数据来源 | 位深 |
+| --- | --- | --- |
+| 缩略图 | iCloud `resJPEGThumbRes` | **8-bit JPEG**（服务端转码）✅ |
+| 下载 | 原始字节写文件，不解码 | 16-bit 原样保存 ✅ |
+| 详情页预览 | 需解码成 Bitmap | **16-bit → 失败** ❌ |
+
+---
+
+### P2-010 —— 修复（A + C）
+
+#### A：原图解码失败时自动降级到 MEDIUM
 
 ```kotlin
-// ICloudImageLoaderFactory
-.components {
-    add(ImageDecoderDecoder.Factory())   // 系统 ImageDecoder，支持 HEIF gain map
+var degradedToMedium by remember(photo.id) { mutableStateOf(false) }
+var isDegrading by remember(photo.id) { mutableStateOf(false) }
+
+val quality = if (degradedToMedium) MEDIUM else ORIGINAL
+
+onError = {
+    when {
+        isUrlIssue -> { /* 刷新 URL 重试 */ }
+
+        // 非 URL 问题 + 还是原图 → 几乎必定是高位深解码失败
+        !isUrlIssue && quality == ORIGINAL -> {
+            isDegrading = true          // 立刻翻转，避免错误面板闪一下
+            scope.launch {
+                withFrameNanos { }      // 必须延到下一帧，否则 AsyncImage 不重建
+                degradedToMedium = true
+            }
+        }
+
+        else -> loadFailed = true       // 中图也失败 → 走 C
+    }
+}
+```
+
+#### C：中图也失败时给出明确提示
+
+```kotlin
+error = {
+    if (isDegrading) {
+        CircularProgressIndicator()   // 过渡帧不画错误面板
+    } else {
+        Text(
+            when {
+                isUrlIssue -> "原图加载失败 (链接已失效)"
+                degradedToMedium -> "该图片为 HDR 高动态范围格式，暂不支持预览\n可点击下方按钮下载原图"
+                else -> "原图无法解码 (该格式暂不支持)"
+            }
+        )
+    }
+}
+```
+
+#### 两个实现陷阱
+
+> [!WARNING]
+> **陷阱 1：`onError` 里直接改 state 不会生效**
+> 回调执行时 Coil 还在收尾失败的请求，新 model 会被吞掉。实测表现为“打印了 `degrading to MEDIUM` 但没有 MEDIUM 请求”。必须 `withFrameNanos { }` 延到下一帧。
+
+> [!WARNING]
+> **陷阱 2：错误面板会闪几帧**
+> 从“原图失败”到“中图加载完成”之间有窗口期，`error` 槽位已被调用。`isDegrading` 标志让过渡期继续显示 loading，消除闪烁。
+
+---
+
+### P2-010 —— 验证结果（三星 SM-F9760 实机）
+
+```
+17:54:59.314  W ICloudPhotoCoil: fail 9426766F... quality=ORIGINAL  error=BitmapFactory null
+17:55:00.784  W PhotoDetailViewer: original decode failed ..., degrading to MEDIUM
+17:55:00.869  D ICloudPhotoCoil: load 9426766F... quality=MEDIUM
+```
+
+- ✅ HDR 图片正常显示（用户确认，多张 HDR 均有效）
+- ✅ 原图失败仅 **1 次**，降级仅 **1 次**（修复前会重复 2 次）
+- ✅ SDR 图片（`406B4317` / `818C472C`）仍走 ORIGINAL，**无误降级**
+- ✅ 提示闪烁已消除（`isDegrading` 生效）
+
+### P2-010 —— 后续可选优化
+
+| 方案 | 说明 | 优先级 |
+| --- | --- | --- |
+| Go 层转码 | 用 `libheif`/`libvips` 把高位深转 8-bit | 🟡 需引入 CGO |
+| 预判位深 | 读文件头提前判断，避免“先试后降” | 🟢 收益有限 |
+| 超大幅图保护 | 12288×8192 的 DJI 图同样需 `.size()` 限制 | 🟢 已由 `.size(2048)` 覆盖 |
+
+---
+
+### P2-011 —— 现象与修复
+
+#### 现象
+
+详情页原图加载失败后尝试刷新 URL，却被去重窗口直接拒绝：
+
+```
+19:50:15.328 I PhotoDetailViewer: image load failed, refreshing url master=AUQhzkGu3...
+19:50:15.332 D PhotoRepository: refreshUrlsForMaster skipped (deduped within window)
+```
+
+#### 根因
+
+去重窗口是**按 masterId 维度**的，但刷新实际同时返回 thumb / med / original 三类 URL。缩略图先失败开启窗口后，详情页请求原图刷新时被误伤。
+
+更关键的是：**解码失败不是 URL 问题**，刷新 URL 无用，却不断撞窗口产生无效请求。
+
+#### 修复
+
+1. **区分错误类型**：只有 HTTP 403/410 才触发刷新，解码失败走降级
+2. **去重键改为 `masterId:quality`**
+3. **详情页提供 `force = true` 通道**（单次用户操作不该被网格去重误伤）
+
+```kotlin
+// PhotoDetailViewer
+val refreshed = repository.refreshUrlsForMaster(photo.masterId, force = true)
+```
+
+#### 验证
+
+新增 `ImageLoadFailureTest`：
+
+| 用例 | 断言 |
+| --- | --- |
+| HTTP 410 / 403 | `isExpiredUrl = true` |
+| HTTP 404 / 500 / 200 | `isExpiredUrl = false` |
+| `IOException`（解码失败）/ `null` | `isExpiredUrl = false` |
+
+`testDebugUnitTest`：**12 passed, 0 failed**。
     add(ICloudPhotoKeyer())
     add(ICloudPhotoInterceptor(repo, SessionManager(context.applicationContext)))
 }
@@ -1581,6 +1723,472 @@ suspend fun refreshUrlsForMaster(
 | `IMG_1338.HEIC` | `AUQhzkGu3AmNvxGLZVpYZieyfodv` |
 | `IMG_1335.HEIC` | `AWqP3cETVjWRaNG7zO6IJj13uMcz` |
 
+---
 
+## ISS-024：Go 层用 `time.Now()` 作排序键兜底，导致照片位置持续漂移
 
+**优先级**：🔴 P0（非跳顶主因，但会造成照片位置漂移）
+**归属**：Go 核心层 — `go-core/photos.go` → `parseRecords()`；Android 防御 `PhotoRepository.parsePhotoItems`
+**发现时间**：Phase 2 深翻页跳顶排查期间
+**对应待办**：P2-017
+
+### 现象
+
+排查深翻页跳顶（ISS-021）时发现：部分照片在列表中位置不稳定，每次分页刷新都向前移动。
+
+### 根因
+
+`go-core/photos.go` 有两处用 `time.Now()` 给缺失时间戳的记录兜底，
+而 `assetDate` 是 `ORDER BY assetDate DESC` 的排序键：
+
+```go
+// ❌ 位置 1：孤儿 master（无对应 CPLAsset）
+AssetDate: time.Now().UnixMilli(),
+AddedDate: time.Now().UnixMilli(),
+
+// ❌ 位置 2：CPLAsset 本身缺 assetDate/addedDate
+if assetDate == 0 {
+    assetDate = time.Now().UnixMilli()
+}
+```
+
+**后果**：同一行每次分页重新入库时排序键都变，在列表中的位置持续漂移，
+且永远被顶到最前面。
+
+### 修复
+
+两处均改为稳定的 `0`（DESC 排序下自然沉底、永不移动）：
+
+```go
+AssetDate: 0,   // never time.Now() — must be stable across fetches
+```
+
+同时移除不再使用的 `"time"` import。
+
+Kotlin 侧同步加防御（`PhotoRepository.parsePhotoItems`）：
+
+```kotlin
+val rawAssetDate = obj.optLong("assetDate", 0L)
+val assetDate = if (rawAssetDate > 0L) rawAssetDate else 0L   // 不再 fallback 到 now
+val addedDate = obj.optLong("addedDate", 0L).takeIf { it > 0L } ?: assetDate
+```
+
+### 验证
+
+`./scripts/build_aar.sh` 成功、`go test ./...` 通过。
+
+### 经验教训
+
+> [!WARNING]
+> **排序键必须是稳定的。** 任何在数据获取阶段生成的“当前时间”都会让同一实体在不同次的
+> 查询中得到不同排序，表现为列表项无序漂移。缺失时间戳时应使用中性值（如 `0`），
+> 而不是当前的 `time.Now()`。
+
+---
+
+## ISS-025：退出登录不清洗照片库与图片缓存，导致换区/换号后残留脏数据
+
+**优先级**：🟠 P1（换账号/换区时必然触发，表现为“图片全部加载失败”）
+**归属**：`ui/auth/AuthViewModel.kt` → `logout()`；`feature/photos/data/PhotoRepository`；
+`feature/photos/data/image/ICloudPhotoCoil`；`feature/photos/data/db/SyncStateDao`
+**发现时间**：Phase 2 收尾
+**对应待办**：原 P2-018
+
+### 现象
+
+切换国区/国际区，或更换 Apple ID 后重新登录：
+
+- 列表仍显示上一个账号的照片（数量、文件名都不对）
+- 图片大面积加载失败（直链属于旧账号，已失效）
+- `dsid` 与新登录账号不匹配，`/records/query` 返回空或报错
+
+### 根因
+
+`logout()` 只清理了**会话层**，未清理**数据层**：
+
+| 数据 | 主键 | 是否账号相关 |
+| --- | --- | --- |
+| `photo_assets` 表 | `recordName` | ✅ CloudKit 记录 ID 属于特定账号 |
+| `sync_state` 表 | `PRIMARY_SYNC` | ✅ 存 `syncToken` / `continuationMarker` |
+| Coil 磁盘缓存 | `icloud_{recordName}_{quality}` | ✅ 图片字节来自旧账号 |
+
+新账号登录后 `bumpSessionGeneration()` → 旧行全部 stale → 首屏批量刷新，
+但用的是**新账号 Cookie** 查**旧账号 recordName**，必然失败。
+
+**附带缺陷**：`removeAllCookies(null)` 是异步的，传 `null` 只是放弃回调，
+紧接着的 `flush()` 可能在删除真正生效前就落盘，导致进程重启后旧 Cookie 仍存在。
+
+### 修复
+
+分四层改造，顺序不可颠倒：
+
+**1. `SyncStateDao` 补充全表清空**
+
+```kotlin
+@Query("DELETE FROM sync_state")
+suspend fun clearAll()
+```
+
+**2. `PhotoRepository` 提供清理入口与阻断开关**
+
+```kotlin
+@Volatile var isWiping: Boolean = false; private set
+fun beginWipe() { isWiping = true; ... }
+fun endWipe()   { isWiping = false; ... }
+
+suspend fun wipeAllData(): Boolean = withContext(Dispatchers.IO) {
+    syncStateDao.clearAll()   // 先清游标：失败时最坏只是重新全量，而不是留指向已删行的 token
+    photoDao.clearAll()
+    refreshMutex.withLock { recentRefreshes.clear(); inFlightRefreshes.clear() }
+    ...
+}
+```
+
+所有网络入口（`checkZoneReady` / `fetchInitialPage` / `fetchNextPage` / `syncIncremental` /
+`refreshUrlsForMaster` / `refreshUrlsForMasters`）开头统一 `wipeBlocked()` 拦截。
+
+**3. `PhotoRemoteMediator.load()` 首行检查 `isWiping`**
+
+这是关键一环：正在飞行中的 APPEND 若在 `clearAll()` 之后完成 `upsertAll()`，
+就会把旧账号的行重新写回。
+
+**4. `ICloudImageLoaderFactory.clearCaches()` + `logout()` 串联**
+
+```kotlin
+fun logout() {
+    _uiState.value = AuthUiState.NotLoggedIn(currentRegion)   // UI 先切走
+    viewModelScope.launch {
+        repository.beginWipe()          // 1. 先阻断，再清库
+        try {
+            repository.wipeAllData()                                  // 2. Room
+            ICloudImageLoaderFactory.clearCaches(app, container)      // 3. Coil
+            clearWebViewCookies()                                     // 4. Session（最后）
+            sessionManager.clearSession()
+        } finally {
+            repository.endWipe()
+        }
+    }
+}
+```
+
+`clearWebViewCookies()` 把异步回调桥接为挂起函数，确保 `flush()` 在删除**之后**才执行：
+
+```kotlin
+private suspend fun clearWebViewCookies() = withContext(Dispatchers.Main) {
+    val cm = CookieManager.getInstance()
+    suspendCancellableCoroutine<Unit> { cont ->
+        cm.removeAllCookies { if (cont.isActive) cont.resume(Unit) }
+    }
+    cm.flush()
+    WebStorage.getInstance().deleteAllData()
+}
+```
+
+### 验证（物理机 SM-F9760 / API 37）
+
+| 项目 | 清理前 | 清理后 |
+| --- | --- | --- |
+| `photo_assets` 行数 | 164 | **0** ✅ |
+| `sync_state` 行数 | 1 | **0** ✅ |
+| Coil `cache/image_cache/` | 57344 B 内容文件 | **仅剩 `journal` 空索引** ✅ |
+| 磁盘 Cookie 表 (`app_webview/Default/Cookies`) | 19 项 | **0 行** ✅ |
+| 加密存储 Cookie 字段 | 有 | **已删（仅剩 keyset）** ✅ |
+
+日志证据（一次性完整执行，无异常）：
+
+```
+16:55:39.424 I/PhotoRepository: Session teardown started - blocking all photo network entry points
+16:55:39.428 I/PhotoRepository: Photo database wiped (photo_assets + sync_state)
+16:55:39.632 W/PhotosViewModel: checkZoneReady failed: 正在退出登录，已暂停照片同步   ← 守卫生效
+16:55:39.696 I/ICloudPhotoCoil: Coil memory + disk caches cleared
+16:55:39.699 I/ICloudAuth: WebView cookies and WebStorage cleared
+16:55:39.702 I/ICloudAuth: Logout complete (region=global) db=true coil=true
+16:55:39.702 I/PhotoRepository: Session teardown finished - photo network entry points re-enabled
+```
+
+退出后 Cookie 探针回到 `total=0 token=false hsa=false pcs=false valid=false`，
+登录页重新加载后出现的 `total=1` 属于苹果登录页自身下发的新 Cookie，不是凭证残留。
+
+### 验证中发现的额外缺陷：Cookie 探针竞态把会话写回
+
+首轮实机验证时（模拟器 / 1523 项图库），数据层清洗全部成功，但 **`shared_prefs` 重启后仍有 7 个业务键**。
+日志暴露了竞态：
+
+```
+16:58:38.725 W/PhotosViewModel: checkZoneReady failed: 正在退出登录，已暂停照片同步   ← 守卫生效
+16:58:38.857 I/ICloudAuth: Three-element cookie validation PASSED, handing over to Go core once.
+16:58:38.859 I/ICloudAuth: Calling Go InitSession (isChinaMainland=true, hasHsaTrust=true)
+16:58:39.023 I/ICloudAuth: WebView cookies and WebStorage cleared
+16:58:39.028 I/ICloudAuth: Logout complete (region=cn) db=true coil=true
+```
+
+**根因**：`removeAllCookies` 是异步的。在它完成之前，登录页的 `onPageStarted` 已经触发，
+此时 `CookieManager` 仍持有**旧的 19 项 Cookie**，探针校验通过 → `onCookiesExtracted()`
+→ `saveSession()` + `initSession()`，把刚销毁的会话原地重建。
+
+**为何旧守卫没能拦住**：`onCookiesExtracted()` 原有的挡位是
+`if (_uiState.value is Authenticating || is LoggedIn) return`。`logout()` 第一时间就把状态
+置为 `NotLoggedIn`，所以这个判断**恰好放行**了竞态回调 —— 典型的「异步状态机挡不住同步回调」
+（见 [docs/PITFALLS.md](docs/PITFALLS.md) §7）。
+
+**修复**：新增同步哨兵位 `AuthViewModel.isLoggingOut`：
+
+```kotlin
+@Volatile private var isLoggingOut: Boolean = false
+
+fun logout() {
+    isLoggingOut = true                  // 第一行，早于任何清理
+    ...
+    viewModelScope.launch {
+        repository.beginWipe()
+        try { /* 四阶段清理 */ }
+        finally {
+            repository.endWipe()
+            delay(COOKIE_CAPTURE_GRACE_MS)   // 等登录页彻底重载
+            isLoggingOut = false
+        }
+    }
+}
+
+fun onCookiesExtracted(result: CookieValidationResult) {
+    if (isLoggingOut) { ...; return }    // 新增
+    ...
+}
+```
+
+`forceExtractCookies()` 同步加同样守卫。`COOKIE_CAPTURE_GRACE_MS = 800L` 是为了覆盖
+「Cookie 已删但登录页尚未完成重载」的窗口。
+
+**修复后同一场景日志**（危险窗口内探针全程为空，再无 `InitSession`）：
+
+```
+17:00:23.087 I/PhotoRepository: Session teardown started - blocking all photo network entry points
+17:00:23.118 I/PhotoRepository: Photo database wiped (photo_assets + sync_state)
+17:00:24.046 D/ICloudAuth: checkCookies source=onPageStarted
+17:00:24.047 D/ICloudAuth: cookie probe @https://www.icloud.com.cn/ total=0 ... valid=false
+17:00:24.168 I/ICloudAuth: WebView cookies and WebStorage cleared
+17:00:24.188 I/ICloudAuth: Logout complete (region=cn) db=true coil=true
+17:00:25.048 D/ICloudAuth: Credential capture re-enabled      ← 800ms 守卫窗口结束
+17:00:25.768 D/ICloudAuth: cookie probe @... total=0 ... valid=false
+```
+
+| 项目 | 修复前 | 修复后 |
+| --- | --- | --- |
+| `photo_assets` | 320 → 0 | 320 → 0 ✅ |
+| `sync_state` | 1 → 0 | 1 → 0 ✅ |
+| Coil 缓存文件数 | 56 → 0 | 56 → 0 ✅ |
+| `shared_prefs` 业务键 | **7（会话写回）** | **1（仅 `is_china_mainland`）** ✅ |
+| 危险窗口内 `InitSession` | 被触发 | **未出现** ✅ |
+
+> [!NOTE]
+> 退出后 `shared_prefs` 保留 2 个 `__androidx_security_crypto_encrypted_prefs_*_keyset__`
+> （加密密钥，**必须**保留）和 1 个加密的 `is_china_mainland`。后者是 `clearSession()`
+> 的既定行为：记住用户上次选的服务区域，让登录页不变区。
+
+### 经验教训
+
+> [!IMPORTANT]
+> **退出登录 = 清除「一切账号作用域状态」，而不只是 Cookie。** 凡是以服务端 ID 作主键的
+> 本地缓存（Room 行、图片字节、同步游标），在会话重建代际后会变成“有效 key + 失效凭证”的
+> 最恶劣组合 —— 表面有数据，实则全部不可用。
+
+> [!WARNING]
+> 清理顺序必须是「**阻断 → 数据层 → 图片层 → 会话层**」。先清数据层再阻断，飞行中的
+> `upsertAll()` 会把已删的行写回；先清 Cookie 再清数据，则中途任何一次自动刷新都会用空
+> Cookie 打 Apple 接口。
+
+> [!CAUTION]
+> **异步清理必须配合同步哨兵位。** WebView 的 Cookie 回调不关心你是否正在退出；
+> `removeAllCookies` 完成前旧 Cookie 仍然可读。只用 `AuthUiState` 判断挡不住这种竞态，
+> 必须在 `logout()` 第一行就置 `@Volatile` 布尔位，并在清理 + 页面重载都结束后才释放。
+
+---
+
+## ISS-026：Cookie 序列化顺序抖动与「会话重建即失效」的错误假设
+
+**优先级**：🟠 P1（每次真会话重建都全库标脏，是 P2-008 刷新洪泛的真正来源）
+**归属**：`go-core/session.go` → `BuildCookieHeader()`；
+`feature/photos/data/PhotoRepository.kt` → `applyRefreshedCookies()` / `ensureGoSession()`；
+`feature/photos/data/image/ICloudPhotoCoil.kt` → `URL_MAX_AGE_MS` / 代际判定
+**发现时间**：ISS-025 验证期间顺带发现
+**对应待办**：原 P2-019
+**状态**：✅ 已修复
+
+### 现象
+
+在一次**普通冷启动**（未换号、未过期）中，日志出现：
+
+```
+16:55:24.174 D/PhotoRepository: Cookies rotated (len 2893 -> 2893)
+16:55:24.177 I/PhotoRepository: Session generation -> 3 (URLs previously minted are now stale)
+```
+
+前后**长度完全相同**（2893），却被判定为「已轮转」，并进而 bump 了 generation。
+
+### 根因一：Cookie 序列化顺序抖动
+
+`BuildCookieHeader()` 遍历 Go `map` 拼装 Cookie 字符串：
+
+```go
+for k, v := range s.CookieMap {   // ← map 迭代顺序在 Go 中是随机化的
+    b.WriteString(k); b.WriteString("="); b.WriteString(v)
+}
+```
+
+Go 语言**故意**打乱 map 的迭代顺序，因此同一份 Cookie 集合每次序列化出的字符串顺序都不同。
+而 `applyRefreshedCookies()` 用**字符串相等**判断是否轮转：
+
+```kotlin
+if (updatedCookies.isNullOrBlank() || updatedCookies == oldCookies) return false
+```
+
+两者结合 → `updatedCookies != oldCookies` 恒为 true → 每次冷启动全库标 stale。
+
+### 根因二（更深）：`/validate` 每次轮换两个 Cookie
+
+修复顺序问题后，实测发现仍有 bump：
+
+```
+Cookie diff: added=[] removed=[] valueChanged=[X-APPLE-WEBAUTH-TOKEN, X-APPLE-WEBAUTH-VALIDATE]
+```
+
+连续 3 次强制重建，3/3 一致。**苹果每次 `/validate` 握手都会下发新的
+`X-APPLE-WEBAUTH-TOKEN` 与 `X-APPLE-WEBAUTH-VALIDATE`。**
+
+所以即使顺序抖动修好了，「Cookie 值变化 → bump generation」这条规则本身也是错的。
+
+### 根因三（根本）：前提假设本身不成立
+
+代码与文档都认为「会话重建 → 所有已签发 URL 立即失效」（见 [AGENTS.md](AGENTS.md) §4.4 /
+§5.4 / §6）。**实测证伪了这一点**，详见
+[`.artifacts/url_lifetime_experiment.md`](.artifacts/url_lifetime_experiment.md)。
+
+摘要（物理机 SM-F9760，`curl -r 0-1023`）：
+
+| 实验 | 结果 |
+| --- | --- |
+| gen=6 的 URL，会话重建到 gen=7 后再测 | **`206` 有效** |
+| URL 年龄 882s (14.7m) | `206` 有效 |
+| URL 年龄 1065s (17.8m) | `410` 失效 |
+
+结论：**URL 有效性由时间决定，与会话代际无关。** CDN 签名绑定的是 record，不是签发它的会话。
+
+同时实测真实寿命是 **~15–18 分钟**，而非文档所称的「1–2 小时」。
+
+### 修复
+
+**1. Go 侧：`BuildCookieHeader()` 按 key 排序（根治顺序抖动）**
+
+```go
+keys := make([]string, 0, len(s.CookieMap))
+for k := range s.CookieMap {
+    keys = append(keys, k)
+}
+sort.Strings(keys)                 // ← 关键：确定性顺序
+
+var b strings.Builder
+for i, k := range keys {
+    if i > 0 {
+        b.WriteString("; ")
+    }
+    b.WriteString(k)
+    b.WriteString("=")
+    b.WriteString(s.CookieMap[k])
+}
+return b.String()
+```
+
+**2. Kotlin 侧：改为集合比较（防御层）**
+
+```kotlin
+internal fun parseCookiePairs(cookieStr: String?): Set<Pair<String, String>> { ... }
+
+val updatedPairs = parseCookiePairs(updatedCookies)
+val oldPairs = parseCookiePairs(oldCookies)
+if (updatedPairs == oldPairs) {
+    Log.d(TAG, "Cookie updates reported but set is unchanged (order-only jitter)")
+    return false
+}
+```
+
+**3. 代际 bump 不再由 Cookie 变化触发**
+
+```kotlin
+// 旧：applyRefreshedCookies(...) 返回 true 也 bump
+// markSessionReady(bumpGeneration = force || cookiesRotated)
+
+// 新：只有显式 force（401/421 恢复路径）才 bump
+applyRefreshedCookies(isChina, dsid, ckUrl)
+markSessionReady(bumpGeneration = force)
+```
+
+**4. 年龄阈值对齐实测值（45min → 12min）**
+
+```kotlin
+// 实测 882s 有效 / 1065s 失效 → 12 分钟留余量
+private const val URL_MAX_AGE_MS = 12 * 60 * 1000L
+```
+
+原本 45 分钟的设定留下约 30 分钟的盲区：URL 早已 410，却仍被当作有效，只能靠失败重试兜底。
+
+**5. 代际降级为「提示」而非「强制刷新」**
+
+```kotlin
+val generationStaleAndAging = generationStale && ageMs > URL_MAX_AGE_MS / 2
+if (activeUrl.isNullOrBlank() || ageStale || generationStaleAndAging) { ...refresh... }
+```
+
+单纯的代际不符**不再**触发刷新（实验已证其与有效性无关），但保留作为换号场景（P2-018）的
+加速信号：代际变了说明可能换了账号，此时把容忍年龄减半。
+
+### 验证
+
+**单元测试**
+
+| 测试 | 内容 |
+| --- | --- |
+| `TestBuildCookieHeaderIsDeterministic` | 同一 session 连续 100 次序列化结果必须一致，且 key 有序 |
+| `TestBuildCookieHeaderPreservesValueBytes` | base64 值（含 `=`）不被排序破坏 |
+| `CookieRotationTest`（8 项） | 顺序不同 → 同一集合；值变/增删 → 真轮转 |
+| `UrlStalenessTest`（7 项） | 代际不符不刷新、超龄必刷新、常量不得回到 45min |
+
+`go test ./...` 与 `testDebugUnitTest`（26 项）全部通过。
+
+> [!TIP]
+> `TestBuildCookieHeaderIsDeterministic` 做过**回归验证**：临时移除 `sort.Strings(keys)`，
+> 测试立即失败，并打印出同一份 Cookie 集合两次调用的不同顺序 —— 证明该测试确实能捕获此 bug。
+
+**实机验证（物理机 SM-F9760）**
+
+| 指标 | 修复前 | 修复后 |
+| --- | --- | --- |
+| 冷启动 + 强制重建的 generation bump | 每次 +1 | **0 次** ✅ |
+| 首屏 + 滚动 3 屏 Coil 加载失败 | — | **0 次** ✅ |
+| 42 分钟老 URL 的加载 | 依赖 410 兜底 | `refreshed -> host=cvws...` **主动换链** ✅ |
+| 深层图（IMG_1881/1296/1880/1878） | — | 正常显示 ✅ |
+
+关键日志（重建发生、Cookie 变了，但**没有** bump）：
+
+```
+17:40:14.975 I/PhotoRepository: Rebuilding Go core session (force=false)...
+17:40:16.075 D/PhotoRepository: Cookie diff: added=[] removed=[] valueChanged=[X-APPLE-WEBAUTH-TOKEN, X-APPLE-WEBAUTH-VALIDATE]
+17:40:16.075 D/PhotoRepository: Cookies rotated (pairs 18 -> 18)
+                                          ← 此处不再出现 "Session generation -> N"
+```
+
+### 经验教训
+
+> [!CAUTION]
+> **不要相信「重建会话 = 所有 URL 作废」这类口头结论 —— 用 curl 实测。**
+> 本项目为此多写了大量防御代码（代际戳、刷新去重、失败重试），而根因只是一个错误前提。
+> 验证方法极简：从 DB 取一条 URL，`curl -r 0-1023`，看 200/206 还是 410。
+
+> [!WARNING]
+> **Go 的 map 迭代顺序是随机的。** 任何「遍历 map 拼出字符串，再拿去做相等比较」的代码
+> 都是定时炸弹。要么排序，要么比较集合。
+
+> [!NOTE]
+> **上游下发的短期令牌不等于凭证轮转。** 苹果每次 `/validate` 都换
+> `X-APPLE-WEBAUTH-TOKEN` / `X-APPLE-WEBAUTH-VALIDATE`，但既不影响已签发 URL，
+> 也不影响任何业务能力。判定「凭证变化」必须基于**会产生后果的**字段变化。
 

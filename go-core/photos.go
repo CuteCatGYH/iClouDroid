@@ -52,11 +52,10 @@ type CKZonesListResponse struct {
 }
 
 type ZoneCheckResult struct {
-	Success      bool   `json:"success"`
-	Ready        bool   `json:"ready"`
-	ZoneName     string `json:"zoneName,omitempty"`
-	SyncToken    string `json:"syncToken,omitempty"`
-	ErrorMessage string `json:"errorMessage,omitempty"`
+	ResultBase
+	Ready     bool   `json:"ready"`
+	ZoneName  string `json:"zoneName,omitempty"`
+	SyncToken string `json:"syncToken,omitempty"`
 }
 
 type CKField struct {
@@ -101,21 +100,19 @@ type PhotoItem struct {
 }
 
 type PhotoPageResult struct {
-	Success            bool        `json:"success"`
+	ResultBase
 	Photos             []PhotoItem `json:"photos"`
 	ContinuationMarker string      `json:"continuationMarker,omitempty"`
 	HasMore            bool        `json:"hasMore"`
 	SyncToken          string      `json:"syncToken,omitempty"`
-	ErrorMessage       string      `json:"errorMessage,omitempty"`
 }
 
 type PhotoChangesResult struct {
-	Success      bool        `json:"success"`
-	Photos       []PhotoItem `json:"photos"`
-	DeletedIDs   []string    `json:"deletedIds"`
-	SyncToken    string      `json:"syncToken,omitempty"`
-	MoreComing   bool        `json:"moreComing"`
-	ErrorMessage string      `json:"errorMessage,omitempty"`
+	ResultBase
+	Photos     []PhotoItem `json:"photos"`
+	DeletedIDs []string    `json:"deletedIds"`
+	SyncToken  string      `json:"syncToken,omitempty"`
+	MoreComing bool        `json:"moreComing"`
 }
 
 type RefreshedURLs struct {
@@ -126,9 +123,8 @@ type RefreshedURLs struct {
 }
 
 type RefreshUrlsResult struct {
-	Success      bool                     `json:"success"`
-	URLs         map[string]RefreshedURLs `json:"urls"`
-	ErrorMessage string                   `json:"errorMessage,omitempty"`
+	ResultBase
+	URLs map[string]RefreshedURLs `json:"urls"`
 }
 
 // Helper methods to unpack CKField values safely
@@ -215,9 +211,15 @@ func (s *Session) photosBaseURL(path string) string {
 	s.mu.RLock()
 	ckURL := s.CKDatabaseURL
 	dsid := s.DSID
+	// Reuse the session's ClientID instead of minting a fresh one per call (ISS-014).
+	// CloudKit binds the continuationMarker cursor to the client that issued it; rotating the
+	// clientId between pages made the server treat each page as a different client.
+	clientID := s.ClientID
+	if clientID == "" {
+		clientID = generateClientID()
+	}
 	s.mu.RUnlock()
 
-	clientID := generateClientID()
 	return fmt.Sprintf(
 		"%s/database/1/com.apple.photos.cloud/production/private/%s?clientBuildNumber=2422Hotfix23&clientMasteringNumber=2422Hotfix23&clientId=%s&dsid=%s&remapEnums=true&getCurrentSyncToken=true",
 		ckURL,
@@ -231,69 +233,72 @@ func (s *Session) photosBaseURL(path string) string {
 func CheckPrimaryZone() string {
 	s := GetSession()
 	if s == nil {
-		res, _ := json.Marshal(ZoneCheckResult{Success: false, ErrorMessage: "No active session"})
-		return string(res)
+		return marshalZoneResult(failBase(ErrCodeAuthExpired, 0, "No active session"), false, "", "")
 	}
 
 	s.mu.RLock()
 	ckURL := s.CKDatabaseURL
 	s.mu.RUnlock()
 	if ckURL == "" {
-		res, _ := json.Marshal(ZoneCheckResult{Success: false, ErrorMessage: "CloudKit database URL is not set"})
-		return string(res)
+		return marshalZoneResult(failBase(ErrCodeAuthExpired, 0, "CloudKit database URL is not set"), false, "", "")
 	}
 
 	reqURL := s.photosBaseURL("zones/list")
 	req, err := s.NewRequest(http.MethodPost, reqURL, "{}")
 	if err != nil {
-		res, _ := json.Marshal(ZoneCheckResult{Success: false, ErrorMessage: err.Error()})
-		return string(res)
+		return marshalZoneResult(failBase(ClassifyNetErr(err), 0, err.Error()), false, "", "")
 	}
 
 	resp, err := s.Client.Do(req)
 	if err != nil {
-		res, _ := json.Marshal(ZoneCheckResult{Success: false, ErrorMessage: err.Error()})
-		return string(res)
+		return marshalZoneResult(failBase(ClassifyNetErr(err), 0, err.Error()), false, "", "")
 	}
 	defer resp.Body.Close()
 	s.ExtractAndSaveCookies(resp)
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		res, _ := json.Marshal(ZoneCheckResult{Success: false, ErrorMessage: err.Error()})
-		return string(res)
+		return marshalZoneResult(failBase(ErrCodeNetwork, 0, err.Error()), false, "", "")
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		res, _ := json.Marshal(ZoneCheckResult{
-			Success:      false,
-			ErrorMessage: fmt.Sprintf("zones/list failed with status %d: %s", resp.StatusCode, string(bodyBytes)),
-		})
-		return string(res)
+		return marshalZoneResult(
+			failBase(
+				ClassifyHTTPStatus(resp.StatusCode),
+				resp.StatusCode,
+				fmt.Sprintf("zones/list failed with status %d: %s", resp.StatusCode, string(bodyBytes)),
+			),
+			false, "", "",
+		)
 	}
 
 	var zonesResp CKZonesListResponse
 	if err := json.Unmarshal(bodyBytes, &zonesResp); err != nil {
-		res, _ := json.Marshal(ZoneCheckResult{Success: false, ErrorMessage: "Failed to parse zones JSON: " + err.Error()})
-		return string(res)
+		return marshalZoneResult(failBase(ErrCodeParse, resp.StatusCode, "Failed to parse zones JSON: "+err.Error()), false, "", "")
 	}
 
 	for _, z := range zonesResp.Zones {
 		if z.ZoneID.ZoneName == "PrimarySync" {
-			res, _ := json.Marshal(ZoneCheckResult{
-				Success:   true,
-				Ready:     true,
-				ZoneName:  "PrimarySync",
-				SyncToken: z.SyncToken,
-			})
-			return string(res)
+			return marshalZoneResult(okBase(), true, "PrimarySync", z.SyncToken)
 		}
 	}
 
+	// The request itself succeeded, but there is no photos zone to work with. Reported as a
+	// dedicated code so Kotlin can tell "zone absent" apart from "request failed".
 	res, _ := json.Marshal(ZoneCheckResult{
-		Success:      true,
-		Ready:        false,
-		ErrorMessage: "PrimarySync zone not found in zones list",
+		ResultBase: failBase(ErrCodeZoneMissing, http.StatusOK, "PrimarySync zone not found in zones list"),
+		Ready:      false,
+	})
+	return string(res)
+}
+
+// marshalZoneResult marshals a ZoneCheckResult from a base plus its zone fields.
+func marshalZoneResult(base ResultBase, ready bool, zoneName, syncToken string) string {
+	res, _ := json.Marshal(ZoneCheckResult{
+		ResultBase: base,
+		Ready:      ready,
+		ZoneName:   zoneName,
+		SyncToken:  syncToken,
 	})
 	return string(res)
 }
@@ -468,8 +473,7 @@ func parseRecords(rawRecords []CKRecord) ([]PhotoItem, []string) {
 func FetchPhotoPage(continuationMarker string, limit int) string {
 	s := GetSession()
 	if s == nil {
-		res, _ := json.Marshal(PhotoPageResult{Success: false, ErrorMessage: "No active session"})
-		return string(res)
+		return marshalPageResult(failBase(ErrCodeAuthExpired, 0, "No active session"))
 	}
 
 	if limit <= 0 || limit > 200 {
@@ -496,46 +500,39 @@ func FetchPhotoPage(continuationMarker string, limit int) string {
 
 	req, err := s.NewRequest(http.MethodPost, reqURL, string(reqBody))
 	if err != nil {
-		res, _ := json.Marshal(PhotoPageResult{Success: false, ErrorMessage: err.Error()})
-		return string(res)
+		return marshalPageResult(failBase(ClassifyNetErr(err), 0, err.Error()))
 	}
 
 	resp, err := s.Client.Do(req)
 	if err != nil {
-		res, _ := json.Marshal(PhotoPageResult{Success: false, ErrorMessage: err.Error()})
-		return string(res)
+		return marshalPageResult(failBase(ClassifyNetErr(err), 0, err.Error()))
 	}
 	defer resp.Body.Close()
 	s.ExtractAndSaveCookies(resp)
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		res, _ := json.Marshal(PhotoPageResult{Success: false, ErrorMessage: err.Error()})
-		return string(res)
+		return marshalPageResult(failBase(ErrCodeNetwork, 0, err.Error()))
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		res, _ := json.Marshal(PhotoPageResult{
-			Success:      false,
-			ErrorMessage: fmt.Sprintf("records/query HTTP %d: %s", resp.StatusCode, string(bodyBytes)),
-		})
-		return string(res)
+		return marshalPageResult(failBase(
+			ClassifyHTTPStatus(resp.StatusCode),
+			resp.StatusCode,
+			fmt.Sprintf("records/query HTTP %d: %s", resp.StatusCode, string(bodyBytes)),
+		))
 	}
 
 	var qResp CKQueryResponse
 	if err := json.Unmarshal(bodyBytes, &qResp); err != nil {
-		res, _ := json.Marshal(PhotoPageResult{
-			Success:      false,
-			ErrorMessage: "Failed to parse records/query JSON: " + err.Error(),
-		})
-		return string(res)
+		return marshalPageResult(failBase(ErrCodeParse, resp.StatusCode, "Failed to parse records/query JSON: "+err.Error()))
 	}
 
 	photos, _ := parseRecords(qResp.Records)
 	hasMore := qResp.ContinuationMarker != ""
 
 	res, _ := json.Marshal(PhotoPageResult{
-		Success:            true,
+		ResultBase:         okBase(),
 		Photos:             photos,
 		ContinuationMarker: qResp.ContinuationMarker,
 		HasMore:            hasMore,
@@ -544,12 +541,20 @@ func FetchPhotoPage(continuationMarker string, limit int) string {
 	return string(res)
 }
 
+// marshalPageResult marshals a failure PhotoPageResult with an empty photo list.
+func marshalPageResult(base ResultBase) string {
+	res, _ := json.Marshal(PhotoPageResult{
+		ResultBase: base,
+		Photos:     []PhotoItem{},
+	})
+	return string(res)
+}
+
 // FetchChanges fetches incremental changes using CloudKit /records/changes and syncToken
 func FetchChanges(syncToken string, limit int) string {
 	s := GetSession()
 	if s == nil {
-		res, _ := json.Marshal(PhotoChangesResult{Success: false, ErrorMessage: "No active session"})
-		return string(res)
+		return marshalChangesResult(failBase(ErrCodeAuthExpired, 0, "No active session"))
 	}
 
 	if limit <= 0 || limit > 200 {
@@ -572,45 +577,38 @@ func FetchChanges(syncToken string, limit int) string {
 
 	req, err := s.NewRequest(http.MethodPost, reqURL, string(reqBody))
 	if err != nil {
-		res, _ := json.Marshal(PhotoChangesResult{Success: false, ErrorMessage: err.Error()})
-		return string(res)
+		return marshalChangesResult(failBase(ClassifyNetErr(err), 0, err.Error()))
 	}
 
 	resp, err := s.Client.Do(req)
 	if err != nil {
-		res, _ := json.Marshal(PhotoChangesResult{Success: false, ErrorMessage: err.Error()})
-		return string(res)
+		return marshalChangesResult(failBase(ClassifyNetErr(err), 0, err.Error()))
 	}
 	defer resp.Body.Close()
 	s.ExtractAndSaveCookies(resp)
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		res, _ := json.Marshal(PhotoChangesResult{Success: false, ErrorMessage: err.Error()})
-		return string(res)
+		return marshalChangesResult(failBase(ErrCodeNetwork, 0, err.Error()))
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		res, _ := json.Marshal(PhotoChangesResult{
-			Success:      false,
-			ErrorMessage: fmt.Sprintf("records/changes HTTP %d: %s", resp.StatusCode, string(bodyBytes)),
-		})
-		return string(res)
+		return marshalChangesResult(failBase(
+			ClassifyHTTPStatus(resp.StatusCode),
+			resp.StatusCode,
+			fmt.Sprintf("records/changes HTTP %d: %s", resp.StatusCode, string(bodyBytes)),
+		))
 	}
 
 	var cResp CKQueryResponse
 	if err := json.Unmarshal(bodyBytes, &cResp); err != nil {
-		res, _ := json.Marshal(PhotoChangesResult{
-			Success:      false,
-			ErrorMessage: "Failed to parse records/changes JSON: " + err.Error(),
-		})
-		return string(res)
+		return marshalChangesResult(failBase(ErrCodeParse, resp.StatusCode, "Failed to parse records/changes JSON: "+err.Error()))
 	}
 
 	photos, deletedIDs := parseRecords(cResp.Records)
 
 	res, _ := json.Marshal(PhotoChangesResult{
-		Success:    true,
+		ResultBase: okBase(),
 		Photos:     photos,
 		DeletedIDs: deletedIDs,
 		SyncToken:  cResp.SyncToken,
@@ -619,22 +617,33 @@ func FetchChanges(syncToken string, limit int) string {
 	return string(res)
 }
 
+// marshalChangesResult marshals a failure PhotoChangesResult with empty slices.
+func marshalChangesResult(base ResultBase) string {
+	res, _ := json.Marshal(PhotoChangesResult{
+		ResultBase: base,
+		Photos:     []PhotoItem{},
+		DeletedIDs: []string{},
+	})
+	return string(res)
+}
+
 // RefreshAssetUrls refreshes download URLs for a list of master record names via /records/lookup
 func RefreshAssetUrls(masterRecordNamesJSON string) string {
 	s := GetSession()
 	if s == nil {
-		res, _ := json.Marshal(RefreshUrlsResult{Success: false, ErrorMessage: "No active session"})
-		return string(res)
+		return marshalRefreshResult(failBase(ErrCodeAuthExpired, 0, "No active session"))
 	}
 
 	var masterNames []string
 	if err := json.Unmarshal([]byte(masterRecordNamesJSON), &masterNames); err != nil {
-		res, _ := json.Marshal(RefreshUrlsResult{Success: false, ErrorMessage: "Invalid master record names JSON: " + err.Error()})
-		return string(res)
+		return marshalRefreshResult(failBase(ErrCodeParse, 0, "Invalid master record names JSON: "+err.Error()))
 	}
 
 	if len(masterNames) == 0 {
-		res, _ := json.Marshal(RefreshUrlsResult{Success: true, URLs: make(map[string]RefreshedURLs)})
+		res, _ := json.Marshal(RefreshUrlsResult{
+			ResultBase: okBase(),
+			URLs:       make(map[string]RefreshedURLs),
+		})
 		return string(res)
 	}
 
@@ -664,41 +673,34 @@ func RefreshAssetUrls(masterRecordNamesJSON string) string {
 
 	req, err := s.NewRequest(http.MethodPost, reqURL, string(reqBody))
 	if err != nil {
-		res, _ := json.Marshal(RefreshUrlsResult{Success: false, ErrorMessage: err.Error()})
-		return string(res)
+		return marshalRefreshResult(failBase(ClassifyNetErr(err), 0, err.Error()))
 	}
 
 	resp, err := s.Client.Do(req)
 	if err != nil {
-		res, _ := json.Marshal(RefreshUrlsResult{Success: false, ErrorMessage: err.Error()})
-		return string(res)
+		return marshalRefreshResult(failBase(ClassifyNetErr(err), 0, err.Error()))
 	}
 	defer resp.Body.Close()
 	s.ExtractAndSaveCookies(resp)
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		res, _ := json.Marshal(RefreshUrlsResult{Success: false, ErrorMessage: err.Error()})
-		return string(res)
+		return marshalRefreshResult(failBase(ErrCodeNetwork, 0, err.Error()))
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		res, _ := json.Marshal(RefreshUrlsResult{
-			Success:      false,
-			ErrorMessage: fmt.Sprintf("records/lookup HTTP %d: %s", resp.StatusCode, string(bodyBytes)),
-		})
-		return string(res)
+		return marshalRefreshResult(failBase(
+			ClassifyHTTPStatus(resp.StatusCode),
+			resp.StatusCode,
+			fmt.Sprintf("records/lookup HTTP %d: %s", resp.StatusCode, string(bodyBytes)),
+		))
 	}
 
 	var lResp struct {
 		Records []CKRecord `json:"records"`
 	}
 	if err := json.Unmarshal(bodyBytes, &lResp); err != nil {
-		res, _ := json.Marshal(RefreshUrlsResult{
-			Success:      false,
-			ErrorMessage: "Failed to parse records/lookup JSON: " + err.Error(),
-		})
-		return string(res)
+		return marshalRefreshResult(failBase(ErrCodeParse, resp.StatusCode, "Failed to parse records/lookup JSON: "+err.Error()))
 	}
 
 	urlMap := make(map[string]RefreshedURLs)
@@ -717,8 +719,17 @@ func RefreshAssetUrls(masterRecordNamesJSON string) string {
 	}
 
 	res, _ := json.Marshal(RefreshUrlsResult{
-		Success: true,
-		URLs:    urlMap,
+		ResultBase: okBase(),
+		URLs:       urlMap,
+	})
+	return string(res)
+}
+
+// marshalRefreshResult marshals a failure RefreshUrlsResult with an empty URL map.
+func marshalRefreshResult(base ResultBase) string {
+	res, _ := json.Marshal(RefreshUrlsResult{
+		ResultBase: base,
+		URLs:       make(map[string]RefreshedURLs),
 	})
 	return string(res)
 }
