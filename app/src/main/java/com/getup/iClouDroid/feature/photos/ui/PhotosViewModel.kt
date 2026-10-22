@@ -16,6 +16,7 @@ import com.getup.iClouDroid.feature.photos.data.db.PhotoMonthIndexEntity
 import com.getup.iClouDroid.feature.photos.work.ScanScheduler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -23,6 +24,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -138,6 +140,56 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
     /** Photos of one month, newest first. Consumers subscribe per month as it scrolls into view. */
     fun observeMonth(yearMonth: Int): Flow<List<PhotoAssetEntity>> =
         repository.observeMonth(yearMonth)
+
+    /**
+     * Photos of every month currently on screen, keyed by `yyyyMM`.
+     *
+     * The gallery emits one row per `columns` photos so that every cell is a direct child of the
+     * single `LazyColumn` — nesting a `LazyVerticalGrid` per month meant the inner grid owned its
+     * own measurement, and after a fast fling it came back with a single row and dropped the rest.
+     *
+     * Rows look their data up here rather than each starting its own query: a month with forty rows
+     * would otherwise open forty cursors for identical data. Subscriptions are added as months
+     * become visible and dropped once the list no longer needs them.
+     */
+    private val _monthPhotos = MutableStateFlow<Map<Int, List<PhotoAssetEntity>>>(emptyMap())
+    val monthPhotos: StateFlow<Map<Int, List<PhotoAssetEntity>>> = _monthPhotos.asStateFlow()
+
+    private val monthJobs = mutableMapOf<Int, Job>()
+
+    /**
+     * Subscribes to every month in the library.
+     *
+     * Deliberately **not** driven by viewport visibility. An earlier version subscribed only to the
+     * months near the viewport and evicted the rest, which broke under fast flinging: the visible
+     * window is rewritten several times per second during a fling, so months were torn down a frame
+     * after being created and came back on screen before their query had emitted — rows found no
+     * data and painted empty. Deferring the eviction only narrowed the window in which that could
+     * happen.
+     *
+     * Subscribing to everything is affordable here precisely because of the row-based layout: every
+     * month is a handful of `PhotoAssetEntity` objects (no bitmaps — Coil holds those), and a
+     * 16k-item library across 108 months is a few thousand small objects. Correctness under
+     * flinging is worth far more than trimming that.
+     */
+    fun subscribeToAllMonths(yearMonths: Collection<Int>) {
+        for (ym in yearMonths) {
+            if (monthJobs[ym] != null) continue
+            monthJobs[ym] = viewModelScope.launch {
+                repository.observeMonth(ym).collect { photos ->
+                    _monthPhotos.update { it + (ym to photos) }
+                }
+            }
+        }
+
+        // Drop subscriptions for months that no longer exist at all (after a re-scan or a wipe).
+        val known = yearMonths.toSet()
+        val gone = monthJobs.keys - known
+        for (ym in gone) {
+            monthJobs.remove(ym)?.cancel()
+            _monthPhotos.update { it - ym }
+        }
+    }
 
     fun setGridColumns(columns: Int) {
         _gridColumns.value = columns.coerceIn(2, 6)
@@ -305,5 +357,14 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
 
     companion object {
         private const val TAG = "PhotosViewModel"
+
+        /**
+         * How long a month stays subscribed after leaving the viewport.
+         *
+         * Long enough to survive the visible-window churn of a fast fling (which can rewrite the
+         * window several times per second) but short enough that memory still tracks the viewport
+         * rather than the whole library.
+         */
+        private const val MONTH_EVICTION_GRACE_MS = 4_000L
     }
 }

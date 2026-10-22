@@ -29,18 +29,30 @@
 
 ---
 
-## 2. 万级图库（10,000+ 照片/视频）的首屏性能与分页限制
+## 2. 万级图库（10,000+ 照片/视频）的首屏性能与扫描策略
 
-**严禁全量拉取后再返回**
+**严禁全量拉取后阻塞等待**
 
 面对上万张照片和数千个视频的存量图库，CloudKit 的 `/records/query` 单次最多返回约 **200 条记录**。
 注意：因为每张照片包含 `CPLAsset` 和 `CPLMaster` 两条记录，实际单次请求约对应 **100 张照片**。
 
-**按需分页与倒序排列**
+**全库月扫描 + 边扫边看**
 
-- 查询时按 `assetDate` 降序请求
-- Go 层每拉取完一页（100 张）立刻返回给 Android 写入 `Room` 数据库
-- 配合 `Paging 3` 实现"打开 App 3 秒内即可浏览最新照片，下拉滑动时继续触发后续游标拉取"
+- 查询时按 `assetDate` 降序请求，使用 `continuationMarker` 游标推进
+- 每拉取完一批就写入 `Room` 并重建对应月份的 `photo_month_index`，UI 立即可以浏览
+- 游标持久化在 `scan_state`，中断后可断点续扫（下次启动不会重头开始）
+- 切到后台由 `MonthScanWorker` 接管，通知栏显示常驻进度
+
+> [!CAUTION]
+> **不要用 Paging 3 的 `RemoteMediator` 做这个。** 它在每次 APPEND 成功后无条件
+> invalidate `PagingSource`，重载窗口 = `initialLoadSize`，超出窗口的滚动位置被 clamp，
+> 表现为深翻页跳回顶部。实测塔陷点恒等于 `initialLoadSize`（60→60、360→360、1200→1200），
+> **无参数可解**。详见 [ISS-027](../CHANGELOG_ISSUES.md#iss-027-paging-3-remotemediator-导致深翻页跳顶改用月分组本地分页根治)。
+
+**滚动锚点用月份，不用全局索引**
+
+月分组后每个月是「一个标题 + N 行」，每月行数不同。任何「每月固定 N 项」的索引换算都会错位，
+必须从 item key（`h_202608` / `r_202608_3`）解析月份。
 
 ---
 
@@ -265,3 +277,114 @@ sort.Strings(keys)
 即使顺序稳定了，也不要把「任何 Cookie 值变化」当作「凭证轮转」。苹果每次 `/validate`
 都轮换 `X-APPLE-WEBAUTH-TOKEN` / `X-APPLE-WEBAUTH-VALIDATE`，但这既不影响已签发 URL，
 也不影响任何业务能力。判定凭证轮转只能基于**会产生后果的**字段变化。
+
+---
+
+## 10. 惰性布局嵌套（LazyColumn 内嵌 LazyVerticalGrid）
+
+> 详细案例见 [ISS-027](../CHANGELOG_ISSUES.md#iss-027-paging-3-remotemediator-导致深翻页跳顶改用月分组本地分页根治)
+
+画廊最初把每个月做成一个嵌套的 `LazyVerticalGrid`，放在外层 `LazyColumn` 里。
+为了让它能被测量，必须给它一个显式高度：
+
+```kotlin
+// ❌ 内层惰性布局拥有自己的测量循环
+LazyColumn {
+    items(months) { month ->
+        LazyVerticalGrid(
+            modifier = Modifier.height(estimateHeight(month.itemCount, columns)),
+            userScrollEnabled = false
+        ) { items(month.photos) { ... } }
+    }
+}
+```
+
+正常滚动时看不出问题。**快速 fling 之后**内层网格只量出了行首一行、其余折叠，
+表现为「月份标题出现了，但内容不加载，只有最上面一个月有图」。
+
+原因是：两个惰性布局各自有独立的测量/回收循环，外层在 fling 时以极快速度重组，
+内层的测量结果来不及跟上，最终提交的是不完整的布局。
+
+```kotlin
+// ✅ 内容展开为外层的直接子项，虚拟化只发生在一个地方
+LazyColumn {
+    monthIndex.forEach { month ->
+        stickyHeader(key = "h_${month.yearMonth}") { MonthHeader(month) }
+        items(count = rowsFor(month.itemCount, columns), key = { "r_${month.yearMonth}_$it" }) { row ->
+            MonthRow(photos = monthPhotos[month.yearMonth].orEmpty(), row = row, columns = columns)
+        }
+    }
+}
+```
+
+`MonthRow` 内部用 `Row` + `Modifier.weight(1f)` 均分宽度，
+`PhotoGridItem` 自带的 `aspectRatio(1f)` 保证单元格为正方形。
+
+> [!CAUTION]
+> **不要在 `LazyColumn` / `LazyRow` 内嵌套任何 `Lazy*Grid`。**
+> 需要网格时按行发出 item，用 `Row` 排布固定数量的格子。
+>
+> 另外：`stickyHeader` 与 `items` 的 key 必须能反推出所属分组（如 `h_202608` / `r_202608_3`）。
+> 滚动锚点、导航跳转都依赖这一点 —— 不能再用「每月固定 N 项」的假设去算索引。
+
+**验证技巧**：用截图体积作客观判据。空白/异常状态截图通常 < 600KB，
+正常渲染（含图片）则 > 1.5MB。比肉眼比对比对更可靠。
+
+---
+
+## 11. 派生状态不要作为参数传递
+
+> 详细案例见 [ISS-027](../CHANGELOG_ISSUES.md#iss-027-paging-3-remotemediator-导致深翻页跳顶改用月分组本地分页根治)
+
+`photo_month_index.isComplete` 表示「全库扫描是否已走完，该月不会再增长」。
+最初的写法是由调用方算出这个值并传进重建函数：
+
+```kotlin
+// ❌ 三个地方各自写 isComplete，互相覆盖
+private suspend fun refreshMonthIndex(yearMonth: Int, isComplete: Boolean)
+
+// 扫描中每批次：写 false
+for (ym in touched) refreshMonthIndex(ym, isComplete = false)
+// 扫描结束：写 true
+monthIndexDao.upsertAll(months.map { it.copy(isComplete = true) })
+// 冷启动重建：又写回 false
+for (ym in all) refreshMonthIndex(ym, isComplete = false)
+```
+
+后果：扫描已经完成并且报过「扫描完成，共 15936 项」，但**每个月标题仍然显示「· 扫描中」**。
+
+```kotlin
+// ✅ 每次从单一真理源读取，与调用者无关
+private suspend fun refreshMonthIndex(yearMonth: Int) {
+    val walkFinished = scanStateDao.get(ScanStateEntity.KEY_MONTH_SCAN)?.isComplete == true
+    monthIndexDao.upsert(PhotoMonthIndexEntity(..., isComplete = walkFinished))
+}
+```
+
+> [!IMPORTANT]
+> **「派生状态」只能有一个写入路径。** 只要它经由参数传递，就必然会在某个调用点被覆盖。
+> 让读取方每次都从真理源取，无论重建多少次结果都一致。
+
+---
+
+## 12. 判断「是否需要初始化」不要看条数
+
+> 详细案例见 [ISS-027](../CHANGELOG_ISSUES.md#iss-027-paging-3-remotemediator-导致深翻页跳顶改用月分组本地分页根治)
+
+启动时自动扫描的触发条件原本是「本地照片数为 0」：
+
+```kotlin
+// ❌ 升级安装有行但未分桶，count != 0，初始化被跳过
+repository.totalCountFlow.collect { count ->
+    if (count == 0 && !hasAutoStarted) { hasAutoStarted = true; startInitialScan() }
+}
+```
+
+从 v3 升级到 v4 时，`photo_assets` 有 164 行、`yearMonth` 全为 0、`photo_month_index` 为空。
+条件为假 → 扫描不启动 → 转年索引永远为空 → 界面显示「已加载 164 项」但主体是「暂无照片」。
+
+**正确做法**：判断「是否存在未处理行」（`countUnbucketed() > 0`），而不是总行数。
+
+> [!WARNING]
+> 任何「本地数量为 0 就去拉取」的初始化条件，在 schema 升级、部分失败、
+> 账号切换等场景下都会失效。应该判断「数据是否已达到可用状态」，而非「是否存在」。

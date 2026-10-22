@@ -257,6 +257,47 @@ Room 照片表与 Coil 缓存都以 `recordName` 为主键，而这些 ID 属于
 
 内存与磁盘缓存 Key 使用 `icloud_{recordName}_{quality}`，**绝不能**绑定会变化的 `downloadURL`，否则签名一换缓存全废。
 
+### 6.4 滚动锚点必须是「月份 key」，不能是全局 index
+
+画廊按**月分组**展示，滚动锚点是 `monthKey`（`yyyyMM`），不是列表序号。
+
+| 旧实现（已删除） | 现状 |
+| --- | --- |
+| `RemoteMediator` + Paging 3，锚点 = `firstVisibleItemIndex` | `LazyColumn` + 行展开，锚点 = `monthKey` |
+| 每次 APPEND 必 invalidate，itemCount 塔陷 → 跳顶 | 无 invalidate，锚点不随追加漂移 |
+
+> [!CAUTION]
+> **不要重新引入 Paging 3 作为分页源。** `RemoteMediator.load()` 返回 `Success` 后，
+> Paging 3 会**无条件** invalidate `PagingSource`，重载窗口 = `initialLoadSize`，
+> 超出窗口的滚动位置被 clamp。这一点已实测确认（60→60、360→360、1200→1200），
+> **无参数可解**。详见 [ISS-021](CHANGELOG_ISSUES.md#iss-021) 与
+> [ISS-027](CHANGELOG_ISSUES.md#iss-027-paging-3-remotemediator-导致深翻页跳顶改用月分组本地分页根治)。
+
+### 6.5 惰性布局不得嵌套
+
+画廊原本每个月是一个嵌套的 `LazyVerticalGrid`。嵌套惰性布局必须给定固定高度，因而内层拥有自己的
+测量循环；外层快速滚动时两者失去同步，内层只量出行首一行、其余折叠，表现为「月份标题出现、内容不加载」。
+
+**约定**：`LazyColumn` 内不得嵌套 `LazyVerticalGrid` / `LazyHorizontalGrid`。
+需要网格时按行发出 item，每行内用 `Row` + `weight(1f)` 排布固定数量的格子（详见 `MonthRow`）。
+
+---
+
+## 6.6 月分组数据层约定
+
+| 概念 | 约定 |
+| --- | --- |
+| 分桶键 | `photo_assets.yearMonth`（`yyyyMM`，**设备本地时区**） |
+| 写入时机 | `parsePhotoItems` 内即时计算，不留 `0` |
+| `0` 的含义 | 「未分桶」，月查询选不到 → 表现为「有数据但看不见」 |
+| 索引表 | `photo_month_index`（派生数据，可随时重建） |
+| 扫描状态 | `scan_state`（含游标，断点续扫） |
+| `isComplete` | **派生值**，每次从 `scan_state` 读取，不得由调用方传入 |
+
+> [!WARNING]
+> **判断「是否需要初始化扫描」不能看行数。** 升级安装有行但未分桶，
+> `count == 0` 为假、初始化被跳过。应判断「是否存在未分桶行」（`countUnbucketed()`）。
+
 ---
 
 ## 7. 错误判定规范
@@ -272,11 +313,19 @@ jsonStr.contains("401")
 
 必须结构化解析，按优先级：
 
-1. Go 层结构化 `errorCode == "AUTH_EXPIRED"`
+1. Go 层结构化 `errorCode`（`AUTH_EXPIRED` / `RATE_LIMITED` / `TIMEOUT` / `NETWORK` / `PARSE` / `ZONE_MISSING` / `NOT_FOUND` / `UNKNOWN`）
 2. `success == false` 才继续
 3. `httpStatus in {401, 421}`
 4. 仅对 `errorMessage` 字段用 `\b` 词边界正则匹配 `HTTP 401/421`
 5. 解析异常一律返回 `false`（失败即放过，绝不误触发昂贵重建）
+
+> [!IMPORTANT]
+> **错误码决定的是「重试还是不重试」，比「是否重建」更重要。**
+> `TIMEOUT` / `RATE_LIMITED` / `NETWORK` 必须**退避重试**，绝不能重建会话。
+> 月扫描会发出一长串 `/records/query`，一次误判的代价是 `/validate` 往返 + 全部 URL 重签，
+> 且会被请求密度放大成重建风暴。实现见 `classifyCoreResponse()` 与 `MonthScanEngine.runScanLoop()`。
+>
+> 新增错误码只能在 `go-core/errors.go` 里加，不得在调用点临时拼字符串。
 
 ### 7.2 HTTP 状态码从异常对象读，不从文本猜
 
@@ -297,7 +346,10 @@ val code = (error.cause as? HttpDataSource.InvalidResponseCodeException)?.respon
 | Tag | 来源 | 用途 |
 | --- | --- | --- |
 | `ICloudAuth` | Android 鉴权探针 | Cookie 捕获、三要素校验、JNI 调用、区域判定 |
-| `PhotoRepository` | Android 数据层 | 会话重建、分页拉取、URL 刷新去重 |
+| `PhotoRepository` | Android 数据层 | 会话重建、URL 刷新去重、账号切换清库 |
+| `MonthScanEngine` | 月扫描引擎 | 扫描分页、退避重试、月份索引维护 |
+| `MonthScanWorker` | 后台扫描 | WorkManager 前台服务与重试 |
+| `PhotosViewModel` | 画廊 VM | 月份订阅、扫描进度、可见状态 |
 | `ICloudPhotoCoil` | Coil 拦截器 | 单图 load / refresh / ok / fail 全链路 |
 | `PhotoDetailViewer` | 详情页 | 播放器错误、图片重试 |
 | `MediaStoreDownloader` | 下载器 | 下载进度与换链 |
@@ -307,7 +359,7 @@ val code = (error.cause as? HttpDataSource.InvalidResponseCodeException)?.respon
 ### 8.2 日志分级约定
 
 - **`Log.i`**：关键业务流程节点（会话重建开始、同步完成、下载成功）
-- **`Log.d`**：高频分页/刷新细节、Cookie 落盘对比
+- **`Log.d`**：高频分页扫描/刷新细节、Cookie 落盘对比
 - **`Log.w`**：可恢复异常（鉴权判定命中、刷新失败、重试）
 - **`Log.e`**：不可恢复异常
 
@@ -371,11 +423,13 @@ app/src/main/java/com/getup/iClouDroid/
 │       ├── data/
 │       │   ├── PhotoDatabase.kt        # 照片专属 Room 库（icloud_photos.db）
 │       │   ├── PhotoRepository.kt      # 会话守卫 + 三层刷新去重 + 所有 Go 调用入口
-│       │   ├── PhotoRemoteMediator.kt  # Paging 3 远端中介器
+│       │   ├── MonthScanEngine.kt      # 全库月扫描（断点续扫/退避重试/月份索引）
+│       │   ├── MonthBucketing.kt       # yyyyMM 分桶（设备本地时区）
 │       │   ├── MediaStoreDownloader.kt # 流式写入 MediaStore，规避 JNI OOM
-│       │   ├── db/                     # PhotoAssetEntity(含 sessionGeneration)、SyncStateEntity、Dao
+│       │   ├── db/                     # PhotoAssetEntity(含 yearMonth)、PhotoMonthIndexEntity、ScanStateEntity、Dao
 │       │   └── image/ICloudPhotoCoil.kt # Keyer 绑 recordName + 拦截器代际判定 + 失败重试 + 日志
-│       └── ui/                         # PhotosScreen(gridState 保位)、PhotoGridItem、PhotoDetailViewer、PhotosViewModel
+│       ├── ui/                         # PhotosScreen(按月分组的 LazyColumn)、MonthRow、MonthHeader、MonthIndexBar、ScanProgressBar、PhotosViewModel
+│       └── work/                       # MonthScanWorker、ScanScheduler、ScanNotificationHelper
 └── ui/
     ├── AppShell.kt                    # 登录后的壳：底部导航 + 各功能入口
     ├── PlaceholderScreen.kt           # 未实现功能的占位页
@@ -416,7 +470,7 @@ app/src/main/java/com/getup/iClouDroid/
 | --- | --- |
 | Phase 0：跨语言工程与编译流水线 | ✅ 完成 |
 | Phase 1：混合鉴权与国区/国际区动态路由 | ✅ 完成 |
-| Phase 2：照片库拉取、万级图库分页与本地缓存（只读预览） | ✅ 完成 |
+| Phase 2：照片库拉取、全库月扫描分段、月分组展示与本地缓存（只读预览） | ✅ 完成 |
 | Phase 3：Android 本地相册自动备份（增量上传） | ⏳ 待开始 |
 | Phase 4：跨生态深度适配（Motion Photo ↔ Live Photo、折叠屏） | ⏳ 待开始 |
 
@@ -428,13 +482,20 @@ app/src/main/java/com/getup/iClouDroid/
 4. **EXIF 时间戳必须准确** —— iCloud 依赖 `assetDate` 排序，写错导致照片乱序
 5. **上传必须走文件路径 + `os.File` 流式**，详见第 3 节第 4 条
 
+### Phase 2 后续偿还的技术债（2026-10 更新）
+
+- [x] **Go 层结构化 `errorCode` / `httpStatus`** —— 已完成，见 [ISS-028](CHANGELOG_ISSUES.md#iss-028-go-层缺结构化错误字段导致-kotlin-靠正则猜)
+- [x] **Room 正式 Migration** —— v4 已移除 `fallbackToDestructiveMigration()`，首例为 `MIGRATION_3_4`
+- [x] **深翻页跳顶（P2-016）** —— 已根治：移除 Paging 3，改为月分组 + 行展开，锚点 = `monthKey`。见 [ISS-027](CHANGELOG_ISSUES.md#iss-027-paging-3-remotemediator-导致深翻页跳顶改用月分组本地分页根治)
+- [ ] `refreshUrlsForMasters()` 批量刷新入口已就绪但未被消费，可在列表预加载时预热
+- [ ] 列表项进入“本月无新照片”状态后可减少索引重建频率
+
 ### Phase 3 建议偿还的技术债
 
-- Go 层返回结构化 `errorCode` / `httpStatus` 字段，取代 Kotlin 侧正则兜底（P2-015）
-- Room 正式 Migration（目前 v3 仍使用 `fallbackToDestructiveMigration()`）
-- `refreshUrlsForMasters()` 批量刷新入口目前已就绪但未被消费，可在列表预加载时预热
-- **深翻页跳顶（P2-016）**：`RemoteMediator` 每次 APPEND 必 invalidate，属 Paging 3 架构性
-  行为。当前为缓解态（`initialLoadSize = 1200`，可滑到 ~2400 项）。根治方案：改用日期分组
-  UI（滚动锚点为「日期 section + 组内偏移」而非全局 index）时一并替换
+- **上传前必须复用 `classifyCoreResponse()`** 的错误码分类，新增上传专属错误码时
+  在 `go-core/errors.go` 注册，不得在调用点临时拼字符串
+- **后台同步与月扫描必须互斥** —— `MonthScanEngine` 已有 `Mutex`，上传任务需同类保护，
+  否则两者会同时写 `photo_assets`
+- **上传统计不进 `scan_state`** —— 那是扫描专用游标表，上传需要自己的进度表
 
 ---

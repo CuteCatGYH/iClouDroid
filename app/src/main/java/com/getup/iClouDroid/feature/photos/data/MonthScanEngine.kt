@@ -149,7 +149,13 @@ class MonthScanEngine(
             // banner over a half-scanned library and left the newest months flagged incomplete.
             val finalState = loadOrCreateState()
             val finished = finalState.isComplete
-            if (!finished) {
+            if (finished) {
+                // Belt and braces. `runScanLoop` stamps every month complete when it exits normally,
+                // but a run that completed on an earlier build (or one whose final sweep was
+                // interrupted) leaves months stuck at isComplete = 0 — which the UI renders as
+                // "扫描中" forever, on a library that is demonstrably finished.
+                markAllMonthsComplete()
+            } else {
                 Log.w(
                     TAG,
                     "scanAll stopped early (scanned=${finalState.scannedCount}, cursor kept) - " +
@@ -250,11 +256,7 @@ class MonthScanEngine(
 
                 val touchedMonths = entities.map { it.yearMonth }.distinct()
                 for (ym in touchedMonths) {
-                    // A month is complete only when the walk has finished outright. Marking it on
-                    // `!page.hasMore` marked just the final batch's month and left every earlier
-                    // month flagged "扫描中" forever. `markAllMonthsComplete()` does the real sweep
-                    // at the end of the walk.
-                    refreshMonthIndex(ym, isComplete = false)
+                    refreshMonthIndex(ym)
                 }
 
                 scanned += entities.size
@@ -318,29 +320,49 @@ class MonthScanEngine(
      *
      * Runs after every batch so a month becomes visible the moment its first photo lands — that is
      * what makes "scan while browsing" possible instead of showing an empty gallery for a minute.
+     *
+     * **`isComplete` is derived, not passed in.** It means one thing only: "the walk has finished,
+     * so this month will not grow any further". Callers used to guess it per-batch, which meant the
+     * last batch's month was stamped complete while every earlier one stayed "扫描中" forever, and a
+     * rebuild during a running scan un-stamped months that were already done. Reading it from
+     * `scan_state` makes the whole index consistent by construction.
      */
-    private suspend fun refreshMonthIndex(yearMonth: Int, isComplete: Boolean) {
+    private suspend fun refreshMonthIndex(yearMonth: Int) {
         if (yearMonth <= 0) return
         val aggregate = photoDao.monthAggregate(yearMonth) ?: return
         if (aggregate.itemCount <= 0) {
             monthIndexDao.deleteMonth(yearMonth)
             return
         }
+        val walkFinished = scanStateDao.get(ScanStateEntity.KEY_MONTH_SCAN)?.isComplete == true
         monthIndexDao.upsert(
             PhotoMonthIndexEntity(
                 yearMonth = yearMonth,
                 itemCount = aggregate.itemCount,
                 firstAssetDate = aggregate.firstAssetDate ?: 0L,
                 lastAssetDate = aggregate.lastAssetDate ?: 0L,
-                isComplete = isComplete
+                isComplete = walkFinished
             )
         )
     }
 
-    /** Rebuilds every month row — used after the v3→v4 backfill. */
-    private suspend fun rebuildMonthIndex() {
-        for (ym in photoDao.distinctYearMonths()) {
-            refreshMonthIndex(ym, isComplete = false)
+    /**
+     * Rebuilds every month row — used after the v3→v4 backfill.
+     *
+     * @param completeAll forces every month complete regardless of the walk state. Only used to
+     *   repair an index written by an older build, where the walk had finished but the per-month
+     *   flags never got stamped.
+     */
+    private suspend fun rebuildMonthIndex(completeAll: Boolean = false) {
+        if (completeAll) {
+            for (ym in photoDao.distinctYearMonths()) {
+                refreshMonthIndex(ym)
+            }
+            markAllMonthsComplete()
+        } else {
+            for (ym in photoDao.distinctYearMonths()) {
+                refreshMonthIndex(ym)
+            }
         }
     }
 
@@ -374,15 +396,15 @@ class MonthScanEngine(
     suspend fun ensureMonthIndexUpToDate() = withContext(Dispatchers.IO) {
         runCatching {
             backfillUnbucketedRows()
-            rebuildMonthIndex()
 
-            // If the walk is already finished, the index must say so. Without this a library
-            // scanned by an older build (or one whose final sweep was interrupted) shows every
-            // month as "扫描中" forever, even though nothing is running.
+            // Order matters. `rebuildMonthIndex()` writes every row back with
+            // `isComplete = false`, so the "library is finished" stamp has to be applied AFTER it —
+            // otherwise a cold start un-finishes the whole index and the UI shows “扫描中” on a
+            // library that has been fully scanned for days.
             val state = scanStateDao.get(ScanStateEntity.KEY_MONTH_SCAN)
-            if (state?.isComplete == true) {
-                markAllMonthsComplete()
-            }
+            val finished = state?.isComplete == true
+
+            rebuildMonthIndex(completeAll = finished)
         }.onFailure {
             Log.w(TAG, "Month index backfill failed: ${it.message}")
         }

@@ -4,6 +4,7 @@ import android.app.Application
 import android.util.Log
 import com.getup.iClouDroid.di.AppContainer
 import com.getup.iClouDroid.feature.photos.data.image.ICloudImageLoaderFactory
+import com.getup.icloudcore.Icloudcore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -45,9 +46,36 @@ class IClouDroidApp : Application() {
                 Log.w(TAG, "Coil warm-up failed: ${e.message}")
             }
         }
+
+        // TEMPORARY DIAGNOSTIC — DELETE BEFORE RELEASE.
+        //
+        // Feasibility probe for the photo-detail panel (EXIF/GPS) and Phase 3 dedup.
+        // Runs inside the app process so it can use the stored session, without exposing the
+        // cookie anywhere. Trigger: `adb shell am start` then read `adb logcat -s RecordFieldsProbe`.
+        if (BuildConfig.DEBUG) {
+            appScope.launch {
+                try {
+                    val cookie = container.sessionManager.getCookieString()
+                    if (cookie.isNullOrBlank()) {
+                        Log.i(PROBE_TAG, "No stored cookie - log in first")
+                        return@launch
+                    }
+                    val isChina = container.sessionManager.isChinaMainland()
+                    Log.i(PROBE_TAG, "initSession(isChina=$isChina)")
+                    Log.i(PROBE_TAG, "init -> ${Icloudcore.initSession(cookie, isChina)}")
+                    // Let the app's own session bootstrap settle first: the probe and
+                    // ensureGoSession() otherwise race and clobber each other's session.
+                    kotlinx.coroutines.delay(6_000)
+                    Log.i(PROBE_TAG, "GPS >>> ${Icloudcore.probeGPS(50)}")
+                } catch (e: Exception) {
+                    Log.e(PROBE_TAG, "probe failed", e)
+                }
+            }
+        }
     }
 
     private companion object {
+        private const val PROBE_TAG = "RecordFieldsProbe"
         private const val TAG = "IClouDroidApp"
     }
 }

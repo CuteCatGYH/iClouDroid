@@ -80,6 +80,23 @@ func InitSession(cookieStr string, isChinaMainland bool) string {
 		return string(res)
 	}
 
+	// Persist the routing information on the session itself.
+	//
+	// Without this the session object holds no `DSID` / `CKDatabaseURL`, so `photosBaseURL()`
+	// builds a URL with an empty host — every photo call then fails with
+	// `unsupported protocol scheme ""`. It went unnoticed because the Kotlin layer reads these
+	// values from InitSession's *return value* and persists them to its own encrypted store;
+	// only in-process callers (diagnostics, and anything running before Kotlin re-primes the
+	// session) ever hit it.
+	session.mu.Lock()
+	if result.DSID != "" {
+		session.DSID = result.DSID
+	}
+	if result.CKDatabaseURL != "" {
+		session.CKDatabaseURL = result.CKDatabaseURL
+	}
+	session.mu.Unlock()
+
 	resBytes, _ := json.Marshal(result)
 	return string(resBytes)
 }

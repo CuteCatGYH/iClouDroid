@@ -50,10 +50,10 @@
 > [!NOTE]
 > Phase 1 与 Phase 2 的所有已修复问题及案例闭环记录（ISS-001 ~ ISS-014）已完整收录并归档至 [CHANGELOG_ISSUES.md](CHANGELOG_ISSUES.md)。
 
-### Phase 2: 照片库拉取、万级图库分页与本地缓存 (只读预览) ✅
+### Phase 2: 照片库拉取、全库月扫描与月分组本地缓存 (只读预览) ✅
 
 - [x] **🔴 P0 阻塞 — 冷启动恢复跳过 Go 会话重建** ✅（已通过 `PhotoRepository.ensureGoSession()` 解决，详见 [ISS-012](CHANGELOG_ISSUES.md#iss-012-冷启动恢复跳过-go-会话重建导致照片接口全局报-no-active-session)）
-- [x] **🟠 P1 — 会话守卫未下沉到 `PhotoRepository`** ✅（已将 `ensureGoSession(force)` 统一封装至 `PhotoRepository` 的 `checkZoneReady` / `fetchInitialPage` / `fetchNextPage` / `syncIncremental` / `refreshAssetUrls` 全部入口，支持 401/421 自动静默重建与 Token 自动续期）
+- [x] **🟠 P1 — 会话守卫未下沉到 `PhotoRepository`** ✅（已将 `ensureGoSession(force)` 统一封装至 `PhotoRepository`，覆盖 `checkZoneReady` / `fetchScanPage` / `syncIncremental` / `refreshUrlsForMaster` 全部入口，支持 401/421 自动静默重建与 Token 自动续期；全库扫描走 `MonthScanEngine` 并复用同一守卫）
 - [x] **🟡 P2 — 跨子域 Cookie 首次真实验证** ✅（已通过 `Session.NewRequest` 手动注入 CookieMap 验证通过）
 
 - [x] **Go 核心层：CloudKit (`ckdatabasews`) 查询接口封装**
@@ -65,9 +65,9 @@
 - [x] **Go 核心层：增量同步 (Delta Sync)**
   - [x] 对接 `/records/changes`，保存并传入 `syncToken`，仅拉取增量变更
   - [x] 对接 `/records/lookup`，实现 `RefreshAssetUrls` 解决 1 小时直链过期失效
-- [x] **Android 端：本地数据库索引与流畅瀑布流**
-  - [x] `Room` 数据库（`PhotoAssetEntity`、`SyncStateEntity`、`PhotoDao`、`AppDatabase`）
-  - [x] `Paging 3` + `RemoteMediator` + `LazyVerticalGrid` 瀑布流（首屏秒开、动态 3/4/5 列缩放切换）
+- [x] **Android 端：本地数据库索引与流畅画廊**
+  - [x] `Room` 数据库（`PhotoAssetEntity(含 yearMonth)`、`SyncStateEntity`、`PhotoMonthIndexEntity`、`ScanStateEntity`、`PhotoDatabase`）
+  - [x] `MonthScanEngine` 全库扫描 + `LazyColumn` 月分组展示（首屏秒开、动态 3/4/5 列缩放切换、年月导航条）
   - [x] 自定义 `Coil` `Interceptor` 与 `Keyer`（缓存 Key 绑定 `recordName`，按需检测直链过期自动刷新）
   - [x] `Media3 (ExoPlayer)` 云端视频流式播放 + 一键流式下载写入 `MediaStore`（规避 JNI OOM）
 
@@ -87,7 +87,8 @@
 - [x] **排序键不稳定** ✅（`ORDER BY assetDate DESC, id ASC` + 复合索引）
 - [x] **退出登录不清洗数据层（P2-018）** ✅（`logout()` 四阶段清洗：阻断 → Room → Coil → Cookie/Vault，并修复 `removeAllCookies` 未等回调就 `flush()` 的缺陷，详见 [ISS-025](CHANGELOG_ISSUES.md#iss-025)）
 - [x] **Cookie 顺序抖动 + 错误失效假设（P2-019）** ✅（Go 侧 `BuildCookieHeader` 排序 + Kotlin 侧集合比较；实测推翻「会话重建即失效」，URL 真实寿命 ~15-18 分钟而非 1-2 小时，`URL_MAX_AGE_MS` 45min→12min，代际不再由 Cookie 变化触发 bump。详见 [ISS-026](CHANGELOG_ISSUES.md#iss-026)）
-- [ ] **⚠️ 深翻页跳顶（P2-016）** — `RemoteMediator` 每次 APPEND 必 invalidate，属 Paging 3 架构性行为。当前为缓解态（`initialLoadSize=1200`），**根治待 UI 重构时一并解决**（详见 [ISS-021](CHANGELOG_ISSUES.md#iss-021-remotemediator-每次-append-必-invalidate导致深翻页跳顶)）
+- [x] **深翻页跳顶（P2-016）** — ✅ **已根治**：彻底移除 Paging 3 `RemoteMediator`，改为月分组 + 行展开的本地分页，滚动锚点由全局 index 改为 `monthKey`。详见 [ISS-027](CHANGELOG_ISSUES.md#iss-027-paging-3-remotemediator-导致深翻页跳顶改用月分组本地分页根治)
+- [x] **Go 层结构化错误字段（P2-015）** — ✅ **已修复**：新增 `errors.go`（`errorCode` + `httpStatus`），Kotlin 侧收敛为 `classifyCoreResponse()`。详见 [ISS-028](CHANGELOG_ISSUES.md#iss-028-go-层缺结构化错误字段导致-kotlin-靠正则猜)
 
 #### 架构重构：多功能 iCloud 客户端演进 (全功能 App 骨架) ✅
 
@@ -105,9 +106,9 @@
 | `auth error` | **0 次** |
 | WebView 冷启动初始化 | **0 次** |
 | `Choreographer: Skipped` | **无** |
-| 滚动中 `itemCount` 塌陷 | **0 次**（index 平滑至 336，itemCount 稳定 1200） |
+| 滚动中 `itemCount` 塌陷 | **0 次** |
 | `go test ./...` | **ok** |
-| `testDebugUnitTest` | **26 passed, 0 failed**（P2-019 新增 15 项） |
+| `testDebugUnitTest` | **70 passed, 0 failed** |
 
 **P2-019 修复后补充验证**（物理机 SM-F9760）：
 
@@ -116,6 +117,18 @@
 | 冷启动 + 强制重建的 generation bump | **0 次**（修复前每次 +1） |
 | 首屏 + 滚动 3 屏的 Coil 加载失败 | **0 次** |
 | 42 分钟老 URL | 主动 `refreshed` 换链，无需等 410 |
+
+**UI 重构（月分组）后验证**（物理机 SM-F9760，15,936 项 / 108 个月）：
+
+| 指标 | 结果 |
+| --- | --- |
+| 30 次极速上滑（30ms） | 内容完整渲染（截图 2.37MB） |
+| 反向 30 次极速上滑 | 内容完整渲染（截图 2.37MB） |
+| 月份 `isComplete` 盖章 | 108/108 全部为 1 |
+| `yearMonth = 0` 滞留行 | **0** |
+| 年份跳转（→2020） | 正确落位 |
+| 后台扫描崩溃 | **0 次** |
+| `FATAL EXCEPTION` | **0** |
 
 ### Phase 3: Android 本地相册自动备份 (增量上传)
 

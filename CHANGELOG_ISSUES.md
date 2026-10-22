@@ -32,12 +32,14 @@
 | [ISS-018](#iss-018-网格滚动位置丢失与日志刷屏) | 网格滚动位置丢失与日志刷屏 | 🟡 P2 | Android / UI + 日志 | ✅ 已修复 |
 | [ISS-019](#iss-019-append-指示器作为网格项导致列表跳回顶部) | `append` 指示器作为网格项导致列表跳回顶部 | 🔴 P0 | Android / UI | ✅ 已修复 |
 | [ISS-020](#iss-020-continuationmarker-失效后仍被重放引发-401--重建死循环) | `continuationMarker` 失效后仍被重放，引发 401 → 重建死循环 | 🔴 P0 | Android / Repository | ✅ 已修复 |
-| [ISS-021](#iss-021-remotemediator-每次-append-必-invalidate导致深翻页跳顶) | `RemoteMediator` 每次 APPEND 必 invalidate，导致深翻页跳顶 | 🔴 P0 | Android / Paging | ⚠️ 缓解态，根治待 UI 重构 |
+| [ISS-021](#iss-021-remotemediator-每次-append-必-invalidate导致深翻页跳顶) | `RemoteMediator` 每次 APPEND 必 invalidate，导致深翻页跳顶 | 🔴 P0 | Android / Paging | ✅ 已修复（ISS-027 根治） |
 | [ISS-022](#iss-022-冷启动时-login-webview-被提前构造阻塞主线程-33-秒) | 冷启动时 Login WebView 被提前构造，阻塞主线程 ~3.3 秒 | 🟠 P1 | Android / 启动 | ✅ 已修复 |
 | [ISS-023](#iss-023-hdr-高位深原图无法解码--解码失败误触发-url-刷新) | HDR 高位深原图无法解码 + 解码失败误触发 URL 刷新 | 🟠 P1 | Android / Coil + Repository | ✅ 已修复 |
 | [ISS-024](#iss-024-go-层用-timenow-作排序键兜底导致照片位置持续漂移) | Go 层用 `time.Now()` 作排序键兜底，导致照片位置持续漂移 | 🔴 P0 | Go 核心层 | ✅ 已修复 |
 | [ISS-025](#iss-025-退出登录不清洗照片库与图片缓存导致换区换号后残留脏数据) | 退出登录不清洗照片库与图片缓存，导致换区/换号后残留脏数据 | 🟠 P1 | Android / Session + Storage | ✅ 已修复 |
 | [ISS-026](#iss-026-cookie-序列化顺序抖动与会话重建即失效的错误假设) | Cookie 序列化顺序抖动与「会话重建即失效」的错误假设 | 🟠 P1 | Go / Android 跨语言 | ✅ 已修复 |
+| [ISS-027](#iss-027-paging-3-remotemediator-导致深翻页跳顶改用月分组本地分页根治) | Paging 3 `RemoteMediator` 导致深翻页跳顶，改用月分组本地分页根治 | 🔴 P0 | Android / UI + Paging | ✅ 已修复 |
+| [ISS-028](#iss-028-go-层缺结构化错误字段导致-kotlin-靠正则猜) | Go 层缺结构化错误字段，导致 Kotlin 靠正则猜 | 🟡 P2 | Go / Android 跨语言 | ✅ 已修复 |
 
 ---
 
@@ -2191,4 +2193,173 @@ if (activeUrl.isNullOrBlank() || ageStale || generationStaleAndAging) { ...refre
 > **上游下发的短期令牌不等于凭证轮转。** 苹果每次 `/validate` 都换
 > `X-APPLE-WEBAUTH-TOKEN` / `X-APPLE-WEBAUTH-VALIDATE`，但既不影响已签发 URL，
 > 也不影响任何业务能力。判定「凭证变化」必须基于**会产生后果的**字段变化。
+
+---
+
+## ISS-027：Paging 3 RemoteMediator 导致深翻页跳顶，改用月分组本地分页根治
+
+**优先级**：🔴 P0
+**归属**：`feature/photos/ui` `PhotosScreen` / `PhotosViewModel`；`feature/photos/data` `MonthScanEngine`；`PhotoRepository` / `PhotoDatabase` / `PhotoDao`
+**发现时间**：Phase 2 UI 重构
+**对应待办**：原 P2-016（含 ISS-021 根治）
+
+### 现象
+
+1. 深翻页时列表跳回顶部（ISS-021，此前只能调参缓解）
+2. 扫描报告完成，但每月标题始终带「· 扫描中」
+3. **快速上滑时月份标题先出现、内容不加载**，极端情况下“只加载最上面那一个月”
+4. 升级/换号后顶部显示「已加载 164 项」，主体却是「暂无 iCloud 照片」
+
+### 根因（四个独立缺陷，逐个击破）
+
+#### ① 跳顶：`RemoteMediator` 架构性缺陷
+
+Paging 3 在每次 `MediatorResult.Success` 后**无条件 invalidate `PagingSource`**，重载窗口 = `initialLoadSize`。超出窗口的 `firstVisibleItemIndex` 被 clamp。已实测确认塔陷点恒等于 `initialLoadSize`（60→60、360→360、1200→1200），**无参数可解**。
+
+#### ② 内容不加载：嵌套惰性布局
+
+每个月是一个嵌套的 `LazyVerticalGrid`。嵌套惰性布局必须给定固定高度，于是**内层拥有自己的测量循环**。快速 fling 后内层只量出行首一行、其余折叠。
+
+#### ③ 月份永远「扫描中」：`isComplete` 被反复覆盖
+
+三重叠加：`markAllMonthsComplete()` 只在循环正常结束时调用；`rebuildMonthIndex()` 每次重建写回 `false` 且先于盖章执行；扫描中每批次也写 `false`。
+
+#### ④ 有数据但看不见：`yearMonth` 从未计算
+
+`parsePhotoItems` 不计算 `yearMonth`，全部行以 `0` 入库；月查询 `WHERE yearMonth = :ym` 永远选不到。唯一补偿是 `scanAll()` 开头的回填，但 `isComplete == 1` 时提前 return，回填被跳过。
+
+### 修复方案
+
+#### 1. 彻底移除 Paging 3，改为月分组 + 行展开
+
+- 删除 `PhotoRemoteMediator.kt`、`photoPagingFlow`、`PhotoDao.pagingSource()`、`INITIAL_LOAD_SIZE`、`PREFETCH_DISTANCE`
+- 新建 `MonthScanEngine` 接管全库扫描（断点续扫 / 边扫边看 / 指数退避重试）
+- `LazyColumn` 直接发出**行 item**，每个格子都是滚动布局的直接子项，嵌套问题从根上消失
+
+#### 2. `isComplete` 改为派生值
+
+```kotlin
+private suspend fun refreshMonthIndex(yearMonth: Int) {
+    // 直接从 scan_state 读取，而非由调用方传入
+    val walkFinished = scanStateDao.get(ScanStateEntity.KEY_MONTH_SCAN)?.isComplete == true
+    monthIndexDao.upsert(PhotoMonthIndexEntity(..., isComplete = walkFinished))
+}
+```
+
+无论何时重建、由谁触发，全表状态均与「行走是否走完」一致。
+
+#### 3. 写入时即分桶
+
+```kotlin
+// parsePhotoItems
+PhotoAssetEntity(..., yearMonth = MonthBucketing.yearMonthOf(assetDate))
+```
+
+同时 `syncIncremental` 新增 `rebuildMonthIndexFor(...)`，增量同步的照片不再滞留 `yearMonth = 0`。
+
+#### 4. 月份订阅改为全量
+
+可见性驱动的订阅在 fling 中每帧重建，月份刚订阅就被拆、回来时数据未到 → 空白。月份只持 `PhotoAssetEntity`（无位图），全量订阅代价可接受。
+
+#### 5. 换号检测
+
+`ensureGoSession()` 发现 `dsid` 变化时主动 `wipeAllData()`，不再依赖用户走退出登录流程。
+
+### 验证结果（真机 SM-F9760，15,936 项 / 108 个月）
+
+| 场景 | 修复前 | 修复后 |
+| --- | --- | --- |
+| 6 次快速上滑 | 标题正常、内容只渲 1 张 | 28 个格子正常渲染 |
+| 30 次极速上滑（30ms） | 空白（截图 514KB） | 内容完整（2.37MB） |
+| 反向 30 次极速上滑 | — | 内容完整（2.37MB） |
+| 月份 `isComplete` | 41~90 个月为 0 | 108 个月全部为 1 |
+| `yearMonth = 0` 滞留 | 164 行 | 0 行 |
+| 年份跳转 → 2020 | — | 正确落位 2020年11月 |
+| 冷启动会话重建 | — | 0 次 |
+
+截图体积作客观判据：空白状态 118~514KB，正常状态 1.6~2.4MB。
+
+### 经验教训
+
+> [!IMPORTANT]
+> **不要嵌套惰性布局。** 内层 lazy 布局必须给定固定高度，于是它拥有自己的测量循环，
+> 外层 fling 时两者会失去同步。改为把内容展开成外层的直接子项，虚拟化只发生在一个地方。
+
+> [!WARNING]
+> **派生状态不要作为参数传递。** `isComplete` 由调用方猜、又由多处写回，必然被覆盖。
+> 让它每次从单一真理源（`scan_state`）读取，无论重建多少次结果都一致。
+
+> [!CAUTION]
+> **不要用“列表是否为空”判断是否需要初始化。** 升级安装有数据但未分桶，
+> `count == 0` 为假，初始化被跳过 —— 表现为“有数据但看不见”。判断依据应是
+> “是否存在未分桶行”，而非行数。
+
+---
+
+## ISS-028：Go 层缺结构化错误字段，导致 Kotlin 靠正则猜
+
+**优先级**：🟡 P2（技术债，但被月扫描重构放大为阻塞项）
+**归属**：`go-core/errors.go`（新）、`go-core/photos.go`、`feature/photos/data/PhotoRepository.kt`
+**发现时间**：Phase 2 UI 重构前置
+**对应待办**：原 P2-015
+
+### 现象
+
+Go 侧只返回 `errorMessage` 字符串，Kotlin 只能靠正则/字符串匹配猜错误类型。
+
+### 根因
+
+早期实现：`jsonStr.contains("401")` 被 base64 `continuationMarker` 误伤（ISS-013 / ISS-015）。
+止血后仍是词边界正则。虽然可靠，但**随扫描器提高请求密度会大幅放大风险**：一次误判 = 一次
+`/validate` 往返 + 全部缓存 URL 重签。
+
+### 修复方案
+
+新增 `go-core/errors.go`：
+
+```go
+const (
+    ErrCodeAuthExpired = "AUTH_EXPIRED"
+    ErrCodeRateLimited = "RATE_LIMITED"   // 退避重试，不重建
+    ErrCodeTimeout     = "TIMEOUT"         // 退避重试，不重建
+    // ...
+)
+
+type ResultBase struct {
+    Success      bool   `json:"success"`
+    ErrorCode    string `json:"errorCode,omitempty"`
+    HttpStatus   int    `json:"httpStatus,omitempty"`
+    ErrorMessage string `json:"errorMessage,omitempty"`
+}
+```
+
+四个导出结果结构体嵌入 `ResultBase`。Go 匿名字段会提升到 JSON 顶层，所以**线格式仍是扁平的**，
+与现有 Kotlin 解析完全兼容（零破坏性变更）。
+
+Kotlin 侧抽出纯函数 `classifyCoreResponse()` → `CoreErrorKind`，`isAuthError` 降为薄封装，
+调用点零改动。
+
+### 验证结果
+
+**真实故障下的实测日志**（扫描中网络中断）：
+
+```
+scan transient failure (NETWORK), retrying in 1000ms (attempt 1/5)
+... 2000ms -> 4000ms -> 8000ms -> 16000ms
+scan giving up after 6 transient failures: dial tcp: lookup ... no such host
+scanAll stopped early (scanned=6719, cursor kept) - will resume on the next trigger
+```
+
+`NETWORK` 被正确分类为**退避重试**，而非重建会话 —— 这正是本修复的核心价值。
+
+| 测试 | 结果 |
+| --- | --- |
+| `go test ./...`（含 `errors_test.go`） | ok |
+| `CoreErrorTest`（18 项） | 全绿 |
+| `testDebugUnitTest` 总计 | 70 passed |
+
+> [!NOTE]
+> 为测试 JSON 解析逻辑，新增了 `testImplementation(libs.json)`（`org.json:json`）。
+> 必须：Android 的 `org.json` 在 JVM 单测环境是**空实现**，每个方法都抛异常，
+> 导致所有用例静默返回 `UNKNOWN`。
 

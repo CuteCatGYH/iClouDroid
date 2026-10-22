@@ -5,7 +5,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -40,6 +42,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -59,12 +62,24 @@ import kotlinx.coroutines.launch
  * Box
  *  ├─ LazyColumn                     ← always composed
  *  │   ├─ stickyHeader  2026年8月
- *  │   ├─ item          MonthGrid(8月)
+ *  │   ├─ item  row     (8月, 8 photos)
+ *  │   ├─ item  row     (8月, 8 photos)
  *  │   ├─ stickyHeader  2026年7月
- *  │   └─ item          MonthGrid(7月)
+ *  │   └─ item  row     (7月, 8 photos)
  *  ├─ MonthIndexBar                  ← floating year/month jump
  *  └─ (overlay) empty / error states ← drawn on top, never replacing the list
  * ```
+ *
+ * ## Why the grid is emitted as rows
+ *
+ * Each month used to be a single `LazyVerticalGrid` nested in this list. That cost correctness:
+ * an inner lazy layout inside an outer one must be given an explicit height, so its children were
+ * measured by the inner layout while the outer was flinging. After a fast fling the inner grid came
+ * back having laid out one row and collapsed the rest — the reported symptom being "the month
+ * titles appear, but the photos never load and only the top month renders".
+ *
+ * Emitting one row per `columns` photos makes every cell a direct child of the single layout that
+ * owns scrolling, so virtualisation and measurement happen in exactly one place.
  *
  * ## Why the list is never swapped out
  *
@@ -95,6 +110,7 @@ fun PhotosScreen(
     val syncMessage by viewModel.syncMessage.collectAsStateWithLifecycle()
     val selectedPhoto by viewModel.selectedPhoto.collectAsStateWithLifecycle()
     val downloadState by viewModel.downloadState.collectAsStateWithLifecycle()
+    val monthPhotos by viewModel.monthPhotos.collectAsStateWithLifecycle()
 
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -111,6 +127,19 @@ fun PhotosScreen(
     // change the layout, and it is keyed by month identity (see the class doc).
     val currentMonth by remember(listState, monthKeys) {
         derivedStateOf { monthKeyAt(listState, monthKeys) }
+    }
+
+    // Subscribe to every month up front.
+    //
+    // Driven by the month index rather than by what is currently visible: the visible window is
+    // rewritten several times per second during a fast fling, so a viewport-driven subscription
+    // tears months down a frame after creating them and the screen lands on rows whose query has
+    // not emitted yet. Months hold only `PhotoAssetEntity` objects (no bitmaps), so keeping them all
+    // subscribed is cheap and makes flinging land on content instead of placeholders.
+    LaunchedEffect(monthKeys) {
+        if (monthKeys.isNotEmpty()) {
+            viewModel.subscribeToAllMonths(monthKeys)
+        }
     }
 
     // Hand the scan to WorkManager when this screen goes away, so a backgrounded app keeps making
@@ -230,10 +259,24 @@ fun PhotosScreen(
                                 isComplete = month.isComplete
                             )
                         }
-                        item(key = "g_${month.yearMonth}") {
-                            MonthSection(
-                                viewModel = viewModel,
-                                yearMonth = month.yearMonth,
+                        // One row per `columns` photos, emitted directly into this LazyColumn
+                        // rather than nesting a LazyVerticalGrid per month.
+                        //
+                        // That nesting was the cause of the "titles appear but the photos never
+                        // load" bug: an inner lazy grid inside an outer lazy list has to be given
+                        // a fixed height, so its children are measured by the *inner* layout while
+                        // the outer list is flinging. After a fast fling the inner grid came back
+                        // with a single row laid out and the rest collapsed, leaving a month header
+                        // followed by one lonely thumbnail. Emitting rows keeps every cell a direct
+                        // child of the one layout that owns scrolling, so virtualisation and
+                        // measurement happen in exactly one place.
+                        items(
+                            count = rowsFor(month.itemCount, gridColumns),
+                            key = { row -> "r_${month.yearMonth}_$row" }
+                        ) { row ->
+                            MonthRow(
+                                photos = monthPhotos[month.yearMonth].orEmpty(),
+                                row = row,
                                 columns = gridColumns,
                                 onPhotoClick = viewModel::selectPhoto
                             )
@@ -281,9 +324,9 @@ fun PhotosScreen(
                         currentYearMonth = currentMonth,
                         months = monthIndex,
                         onJumpToMonth = { yearMonth ->
-                            val idx = monthKeys.indexOf(yearMonth)
+                            val idx = listIndexOfMonth(monthIndex, gridColumns, yearMonth)
                             if (idx >= 0) {
-                                scope.launch { listState.animateScrollToItem(idx * 2) }
+                                scope.launch { listState.animateScrollToItem(idx) }
                             }
                         },
                         modifier = Modifier
@@ -306,48 +349,88 @@ fun PhotosScreen(
 }
 
 /**
- * Subscribes to one month's photos and renders the grid.
+ * Number of grid rows a month needs at the current column count.
  *
- * The subscription lives here, per month, rather than in the ViewModel: only months that are
- * actually composed hold their contents in memory, so a 16k-item library costs roughly one
- * screenful of entities instead of the whole thing.
+ * Exposed for the section list so the month can be emitted as individual rows.
  */
-@Composable
-private fun MonthSection(
-    viewModel: PhotosViewModel,
-    yearMonth: Int,
-    columns: Int,
-    onPhotoClick: (PhotoAssetEntity) -> Unit
-) {
-    val photos by viewModel.observeMonth(yearMonth)
-        .collectAsStateWithLifecycle(initialValue = emptyList())
-
-    if (photos.isEmpty()) {
-        // A month row exists but its photos are not loaded yet (deleted between index read and
-        // content read). Render nothing rather than a zero-height grid with a header.
-        return
-    }
-
-    MonthGrid(
-        photos = photos,
-        columns = columns,
-        onPhotoClick = onPhotoClick
-    )
+private fun rowsFor(itemCount: Int, columns: Int): Int {
+    if (itemCount <= 0 || columns <= 0) return 0
+    return (itemCount + columns - 1) / columns
 }
 
 /**
- * Which month is the user actually looking at.
+ * Position of a month's **header** in the `LazyColumn`.
  *
- * Naively dividing `firstVisibleItemIndex` by two is wrong twice over:
+ * Each month occupies `1 + rowsFor(itemCount, columns)` items, so the offset of a month cannot be
+ * computed from its ordinal alone. Used by the year/month navigator to scroll to a section.
+ */
+private fun listIndexOfMonth(
+    months: List<com.getup.iClouDroid.feature.photos.data.db.PhotoMonthIndexEntity>,
+    columns: Int,
+    yearMonth: Int
+): Int {
+    var index = 0
+    for (month in months) {
+        if (month.yearMonth == yearMonth) return index
+        index += 1 + rowsFor(month.itemCount, columns)
+    }
+    return -1
+}
+
+/**
+ * A single row of up to [columns] thumbnails belonging to one month.
  *
- *  - the index can point at a **grid** item while that month's header is pinned above it, which is
- *    fine, and
- *  - it can point at the **next** month's header while the previous month's header is still the
- *    one pinned at the top — which made the navigator jump a month ahead of the content.
+ * [photos] is supplied by the caller from a per-month cache, so scrolling through a month does not
+ * re-run the database query once per row.
+ */
+@Composable
+private fun MonthRow(
+    photos: List<PhotoAssetEntity>,
+    row: Int,
+    columns: Int,
+    onPhotoClick: (PhotoAssetEntity) -> Unit
+) {
+    val start = row * columns
+    val end = (start + columns).coerceAtMost(photos.size)
+
+    // Reserve the tile height when the month is still loading, so the list geometry is already
+    // correct and nothing shifts when the photos arrive.
+    val tileSize = LocalConfiguration.current.screenWidthDp.dp / columns
+
+    if (start >= photos.size) {
+        Spacer(modifier = Modifier.height(tileSize))
+        return
+    }
+
+    Row(modifier = Modifier.fillMaxWidth()) {
+        for (i in start until end) {
+            val photo = photos[i]
+            // PhotoGridItem already applies `aspectRatio(1f)`; adding another here would give the
+            // cell two competing square constraints and collapse it. `weight` is all it needs to
+            // share the row.
+            PhotoGridItem(
+                photo = photo,
+                onClick = { onPhotoClick(photo) },
+                modifier = Modifier.weight(1f)
+            )
+        }
+        // Pad a partial row so its tiles keep the same size as a full one.
+        repeat(columns - (end - start)) {
+            Spacer(modifier = Modifier.weight(1f))
+        }
+    }
+}
+
+/**
+ * Which month is the user actually looking at, read from the list's own item keys.
  *
- * Reading the layout's actual visible items resolves both: the pinned header is always the last
- * `h_` item at or above the top edge, so scan the visible window for the newest header that has
- * already reached the top.
+ * Earlier versions divided the visible index by a constant, which only worked while every month
+ * was exactly two items (header + one grid). Months are now a header plus one row per `columns`
+ * photos, so the item count per month varies — the month has to be read from the key on the item
+ * itself: `h_202608` for a header, `r_202608_3` for a row.
+ *
+ * Reading a month *identity* (rather than an offset) is also what keeps the navigator stable: it
+ * names the same month regardless of how many rows that month happens to occupy.
  */
 private fun monthKeyAt(state: LazyListState, monthKeys: List<Int>): Int? {
     if (monthKeys.isEmpty()) return null
@@ -356,16 +439,15 @@ private fun monthKeyAt(state: LazyListState, monthKeys: List<Int>): Int? {
     val firstVisible = layout.visibleItemsInfo.firstOrNull()
         ?: return monthKeys.firstOrNull()
 
-    // Prefer the header that is currently pinned (its offset has been clamped at the top edge).
+    // Prefer the header currently pinned at the top edge.
     val pinnedHeader = layout.visibleItemsInfo.firstOrNull { info ->
-        val key = info.key.toString()
-        key.startsWith("h_") && info.offset <= 0
+        info.key.toString().startsWith("h_") && info.offset <= 0
     }
 
     val key = (pinnedHeader ?: firstVisible).key.toString()
     val raw = when {
         key.startsWith("h_") -> key.removePrefix("h_")
-        key.startsWith("g_") -> key.removePrefix("g_")
+        key.startsWith("r_") -> key.removePrefix("r_").substringBefore('_')
         else -> return monthKeys.firstOrNull()
     }
     return raw.toIntOrNull() ?: monthKeys.firstOrNull()
