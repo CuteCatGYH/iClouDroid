@@ -65,7 +65,7 @@ Android 层细分见第 10 节。
 在修改 Go 代码或 Android 代码后，请严格遵照以下步骤：
 
 1. **若修改了 `/go-core`**：
-   **必须**优先运行 `./scripts/build_aar.sh`。不要直接手动调用裸 `gomobile bind` 命令，因为该脚本会自动配置 `JAVA_HOME` 和 `ANDROID_NDK_HOME`。
+   **必须**优先运行 `../scripts/build_aar.sh`。不要直接手动调用裸 `gomobile bind` 命令，因为该脚本会自动配置 `JAVA_HOME` 和 `ANDROID_NDK_HOME`。
 2. **若修改了 Android 代码**：
    可以使用 `gradle_build` 工具调用 `:app:assembleDebug` 或 `:app:compileDebugKotlin`。
 3. **禁止在 Shell 中使用文本替换工具**：
@@ -110,6 +110,30 @@ Android 层细分见第 10 节。
    > [url_lifetime_experiment.md](.artifacts/url_lifetime_experiment.md)。
 
    因此 URL 刷新只由**年龄**和**真实失败（403/410）**驱动，不靠代际。详见第 6 节。
+
+5. **EXIF / GPS 元数据藏在 `mediaMetaDataEnc`（已实测）**：
+   `CPLMaster` 的 `mediaMetaDataEnc` 是 **base64 包裹的 binary plist**（魔数 `bplist00`），
+   解出后与 Apple `CGImageProperties` 同构，内含 `{TIFF}` / `{Exif}` / `{GPS}` / `{PNG}` 子字典。
+   光圈、快门、ISO、焦距、镜头、拍摄时间、经纬度、海拔全部可得。
+   完整字段字典见 [docs/REFERENCE.md](REFERENCE.md) 第 2A 节。
+
+   > [!IMPORTANT]
+   > **`{GPS}` 不是必然存在** —— 截图与关闭定位的照片都没有。实测 25 条中仅 8 条带 GPS。
+   > 任何展示层必须按字段存在性条件渲染。只判断“有无位置”时用 `CPLAsset.locationEnc`，
+   > 不必解码整个 plist。
+
+6. **上传查重直接用 `resOriginalFingerprint`（已实测）**：
+   Apple 已为原图/中图/缩略图各存了一份指纹字段，**不需要自己计算文件哈希**。
+   Phase 3 的查重就是一次 `/records/query` 比对 fingerprint。
+
+7. **`/records/query` 的 `resultsLimit` 必须 > 1**：
+   传 `1` 会直接返回 `400 BAD_REQUEST: Result size limit must be greater than 1`。
+
+> [!WARNING]
+> **`InitSession` 必须把握手结果回写到 session 自身。** `ValidateSession()` 返回的
+> `DSID` / `CKDatabaseURL` 只是返回值，如果不同步到 `Session` 结构体，任何**进程内**
+> 调用 `photosBaseURL()` 都会拼出空 host（`unsupported protocol scheme ""`）。
+> 此前未暴露，是因为 Kotlin 层自己读了返回值并存进加密存储。详见 [ISS-029](CHANGELOG_ISSUES.md#iss-029)。
 
 ---
 
@@ -194,7 +218,7 @@ Room 照片表与 Coil 缓存都以 `recordName` 为主键，而这些 ID 属于
 1. **先阻断再清库** —— 否则正在飞行中的 `RemoteMediator` APPEND 会 `upsertAll()`
    把已删的行写回。
 2. **不能以 `isWiping` 之外的任何方式抑制同步** —— 用同步布尔哨兵位，
-   不用 Flow/State（异步会竞态，见 [docs/PITFALLS.md](docs/PITFALLS.md) §7）。
+   不用 Flow/State（异步会竞态，见 [docs/PITFALLS.md](PITFALLS.md) §7）。
 3. **顺序：阻断 → 数据层 → Coil → 会话层** —— 先清 Cookie 会让中途的自动刷新
    拿空 Cookie 打 Apple 接口；先清数据层再阻断则会被写回。
 4. **`removeAllCookies` 必须等回调** —— 传 `null` 只是放弃回调，并不代表已同步完成，
@@ -325,7 +349,7 @@ jsonStr.contains("401")
 > 月扫描会发出一长串 `/records/query`，一次误判的代价是 `/validate` 往返 + 全部 URL 重签，
 > 且会被请求密度放大成重建风暴。实现见 `classifyCoreResponse()` 与 `MonthScanEngine.runScanLoop()`。
 >
-> 新增错误码只能在 `go-core/errors.go` 里加，不得在调用点临时拼字符串。
+> 新增错误码只能在 `../go-core/errors.go` 里加，不得在调用点临时拼字符串。
 
 ### 7.2 HTTP 状态码从异常对象读，不从文本猜
 
@@ -382,7 +406,7 @@ val code = (error.cause as? HttpDataSource.InvalidResponseCodeException)?.respon
 **不要编译通过 + 单测绿就宣布完成。** 本项目多次出现过「编译成功、单测全过」但实机崩溃的案例（ISS-013、ISS-016 均如此）。
 
 修改完毕后必须：
-1. `./scripts/build_aar.sh`（如改了 Go）
+1. `../scripts/build_aar.sh`（如改了 Go）
 2. `gradle_build(":app:assembleDebug testDebugUnitTest")`
 3. **部署到 `emulator-5554` 并实际点击/滚动验证**
 4. **拉 logcat 确认无异常、无预期外的重复请求**
@@ -454,13 +478,13 @@ app/src/main/java/com/getup/iClouDroid/
 | [CHANGELOG_ISSUES.md](CHANGELOG_ISSUES.md) | 已修复问题案例库（ISS-001 ~），含现象/日志证据/根因/方案/验证 |
 | [list.md](list.md) | 待修复问题清单（含推荐方案），修完迁往 CHANGELOG |
 | [TODO.md](TODO.md) | 分阶段路线图 |
-| [docs/PITFALLS.md](docs/PITFALLS.md) | 工程避坑指南 |
-| [docs/REFERENCE.md](docs/REFERENCE.md) | 参考开源项目源码对照 |
+| [docs/PITFALLS.md](PITFALLS.md) | 工程避坑指南 |
+| [docs/REFERENCE.md](REFERENCE.md) | 参考开源项目源码对照 |
 
 **归档规范**：
 - 修复真实 bug 后，必须在 `CHANGELOG_ISSUES.md` 新增条目，并更新顶部索引表
 - 若该问题暴露了**通用性陷阱**，同步补充到本文对应章节
-- 若已录入 `docs/PITFALLS.md`，在条目中互相引用
+- 若已录入 `PITFALLS.md`，在条目中互相引用
 
 ---
 
@@ -476,7 +500,7 @@ app/src/main/java/com/getup/iClouDroid/
 
 ### Phase 3 关键提醒
 
-1. **iCloud 上传协议无成熟开源实现**，需参考 [docs/REFERENCE.md](docs/REFERENCE.md) 第 3 节逆向
+1. **iCloud 上传协议无成熟开源实现**，需参考 [docs/REFERENCE.md](REFERENCE.md) 第 3 节逆向
 2. **上传前必须查重** —— 重复上传会产生幽灵重复照片，无法删除
 3. **上传前校验 `X-APPLE-WEBAUTH-PCS-Photos` Cookie** —— 无此凭证无法写入照片库
 4. **EXIF 时间戳必须准确** —— iCloud 依赖 `assetDate` 排序，写错导致照片乱序
@@ -493,7 +517,7 @@ app/src/main/java/com/getup/iClouDroid/
 ### Phase 3 建议偿还的技术债
 
 - **上传前必须复用 `classifyCoreResponse()`** 的错误码分类，新增上传专属错误码时
-  在 `go-core/errors.go` 注册，不得在调用点临时拼字符串
+  在 `../go-core/errors.go` 注册，不得在调用点临时拼字符串
 - **后台同步与月扫描必须互斥** —— `MonthScanEngine` 已有 `Mutex`，上传任务需同类保护，
   否则两者会同时写 `photo_assets`
 - **上传统计不进 `scan_state`** —— 那是扫描专用游标表，上传需要自己的进度表

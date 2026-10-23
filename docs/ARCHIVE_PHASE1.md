@@ -1,9 +1,9 @@
 # Phase 1 过程存档：混合鉴权与动态路由
 
 > 本文档存档 Phase 1 的**详细测试过程、可观测数据与完整的修复方向推演**。
-> 已落地的修复案例已提炼归档至 [CHANGELOG_ISSUES.md](../CHANGELOG_ISSUES.md)；待办事项见 [TODO.md](../TODO.md)。
+> 已落地的修复案例已提炼归档至 [CHANGELOG_ISSUES.md](CHANGELOG_ISSUES.md)；待办事项见 [TODO.md](TODO.md)。
 >
-> 返回 [TODO.md](../TODO.md)
+> 返回 [TODO.md](TODO.md)
 
 ---
 
@@ -25,7 +25,7 @@
 | 跨 JNI 传递 | ✅ `Calling Go InitSession (isChinaMainland=true, hasHsaTrust=true)` |
 
 **Go 侧**：`accountLogin` 返回 `400 Missing apple_id field`。
-根因见 [ISS-001](../CHANGELOG_ISSUES.md#iss-001-cookie-值双引号未剥离导致-go-静默丢弃全部凭证) 与 [ISS-002](../CHANGELOG_ISSUES.md#iss-002-accountlogin-调用顺序错误返回-400-missing-apple_id-field)。
+根因见 [ISS-001](CHANGELOG_ISSUES.md#iss-001-cookie-值双引号未剥离导致-go-静默丢弃全部凭证) 与 [ISS-002](CHANGELOG_ISSUES.md#iss-002-accountlogin-调用顺序错误返回-400-missing-apple_id-field)。
 
 ### 轮次 2：Go 侧修复后 ✅
 
@@ -99,7 +99,7 @@ X-APPLE-WEBAUTH-TOKEN
 
 ### 方向 A：修 Cookie 解析（P0）
 
-✅ **已实施**，详见 [ISS-001](../CHANGELOG_ISSUES.md#iss-001-cookie-值双引号未剥离导致-go-静默丢弃全部凭证)
+✅ **已实施**，详见 [ISS-001](CHANGELOG_ISSUES.md#iss-001-cookie-值双引号未剥离导致-go-静默丢弃全部凭证)
 
 1. `strings.Trim(strings.TrimSpace(v), "\"")` 剥离双引号；跳过 `$Version` / `$Path` / `$Domain` 属性项
 2. `SplitN(part, "=", 2)` 避免 base64/padding `=` 尾部被截断
@@ -107,7 +107,7 @@ X-APPLE-WEBAUTH-TOKEN
 
 ### 方向 B：改用 `/validate` 完成握手（P0）
 
-✅ **已实施**，详见 [ISS-002](../CHANGELOG_ISSUES.md#iss-002-accountlogin-调用顺序错误返回-400-missing-apple_id-field)
+✅ **已实施**，详见 [ISS-002](CHANGELOG_ISSUES.md#iss-002-accountlogin-调用顺序错误返回-400-missing-apple_id-field)
 
 1. `ValidateSession()` + `clientBuildNumber` 等 4 个 query 参数
 2. 从响应取 `dsInfo.dsid`、`webservices.ckdatabasews.url`、`pcsRequired`
@@ -116,7 +116,7 @@ X-APPLE-WEBAUTH-TOKEN
 
 ### 方向 C：跨子域 Cookie 注入（P1）
 
-✅ **已实施**，详见 [ISS-004](../CHANGELOG_ISSUES.md#iss-004-cookie-跨子域下发规则缺失)
+✅ **已实施**，详见 [ISS-004](CHANGELOG_ISSUES.md#iss-004-cookie-跨子域下发规则缺失)
 
 1. `Session` 持有 `CookieMap`，`NewRequest` 手动注入
 2. 自定义 `PublicSuffixList` —— 未采用（选择了方案 1）
@@ -127,14 +127,14 @@ X-APPLE-WEBAUTH-TOKEN
 
 ⚠️ **部分实施**
 
-1. `IsChina` 全分支透传 —— ✅ 已实施，详见 [ISS-003](../CHANGELOG_ISSUES.md#iss-003-sessioninitresultischina-错误分支未赋值)
+1. `IsChina` 全分支透传 —— ✅ 已实施，详见 [ISS-003](CHANGELOG_ISSUES.md#iss-003-sessioninitresultischina-错误分支未赋值)
 2. `errorMessage` 带 HTTP status + 响应体 —— ✅ 已实施
 3. `LogSessionState()` 辅助方法 —— ❌ **未实施**
 4. Kotlin 侧 Debug 页展示 `AccountInfoJSON` —— ❌ **未实施**，当前仅有 Cookie 诊断卡
 
 ### 方向 E：Android 侧健壮性（P1/P2）
 
-✅ **已实施**，详见 [ISS-005](../CHANGELOG_ISSUES.md#iss-005-authviewmodel-区域取值三处推断不一致) / [ISS-006](../CHANGELOG_ISSUES.md#iss-006-登录成功后-icloudwebview-重复触发-initsession)
+✅ **已实施**，详见 [ISS-005](CHANGELOG_ISSUES.md#iss-005-authviewmodel-区域取值三处推断不一致) / [ISS-006](CHANGELOG_ISSUES.md#iss-006-登录成功后-icloudwebview-重复触发-initsession)
 
 1. 统一区域来源 —— ✅ 已实施
 2. `hasSubmitted` 哨兵位 —— ✅ 已实施

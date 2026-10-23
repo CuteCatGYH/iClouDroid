@@ -8,12 +8,12 @@
 
 | 文档 | 内容 |
 | --- | --- |
-| [README.md](README.md) | 项目介绍、架构图、构建步骤 |
+| [README.md](../README.md) | 项目介绍、架构图、构建步骤 |
 | [AGENTS.md](AGENTS.md) | AI Agent 协作规范、编译调试约定 |
 | [CHANGELOG_ISSUES.md](CHANGELOG_ISSUES.md) | **已修复问题案例库**（根因分析、修复方案、验证记录） |
-| [docs/REFERENCE.md](docs/REFERENCE.md) | 核心参考开源项目与源码对照表 |
-| [docs/PITFALLS.md](docs/PITFALLS.md) | 关键工程避坑指南（必读） |
-| [docs/ARCHIVE_PHASE1.md](docs/ARCHIVE_PHASE1.md) | Phase 1 详细过程记录与修复方向存档 |
+| [docs/REFERENCE.md](REFERENCE.md) | 核心参考开源项目与源码对照表 |
+| [docs/PITFALLS.md](PITFALLS.md) | 关键工程避坑指南（必读） |
+| [docs/ARCHIVE_PHASE1.md](ARCHIVE_PHASE1.md) | Phase 1 详细过程记录与修复方向存档 |
 
 ---
 
@@ -22,7 +22,7 @@
 ### Phase 0: 跨语言基础工程与编译流水线搭建 ✅
 
 - [x] **工程目录初始化**（Kotlin + Compose + Material 3 主工程、`/go-core` Go Module）
-- [x] **打通 `gomobile` 编译链路**（`scripts/build_aar.sh` 一键构建、JNI 异常捕获验证）
+- [x] **打通 `gomobile` 编译链路**（`../scripts/build_aar.sh` 一键构建、JNI 异常捕获验证）
 
 ### Phase 1: 混合鉴权与国区/国际区动态路由 (MVP 底座) ✅
 

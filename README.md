@@ -1,129 +1,193 @@
 # iClouDroid
 
-> **Android 原生 iCloud 照片客户端与自动备份工具**  
-> 基于 **Kotlin (Jetpack Compose)** + **Go (gomobile .aar)** 混合架构，旨在解决 Android 与 Apple 跨生态下的照片浏览、双向/单向增量自动同步与动态照片（Motion Photo / Live Photo）互转痛点。
+> **在 Android 手机上直接看你的 iCloud 照片。** 不需要 iPhone，不需要 iPad，也不需要开电脑。
+
+如果你手上是 Android 主力机，但照片都存在 iCloud 里（家里有 iPhone、iPad 或 Mac 在拍），
+这个 App 让你在 Android 上直接浏览那批照片 —— 就像用系统相册一样。
 
 ---
 
-## 🌟 核心特性
+## 它能做什么
 
-- 🔐 **混合安全鉴权**：通过 Android WebView 安全完成 Apple ID 密码输入与 2FA 双重认证，自动拦截并加密存储 `TOKEN`、`HSA-TRUST`、`PCS-CloudKit` 三大关键凭证。
-- 🌏 **双区动态路由**：支持**中国大陆（云上贵州 `icloud.com.cn`）**与**国际区（`icloud.com`）**自动解析分配的 CloudKit (`ckdatabasews`) 专属接入节点。
-- ⚡ **Go 语言高性能协议底座**：复用 `rclone` 网络层，逆向 CloudKit 私有 API，实现会话保活与数据高并发传输。
-- 📱 **现代 Compose UI**：基于 Material 3 Design，自适应折叠屏与大屏布局。
+**📷 浏览整个 iCloud 照片库**
 
----
+登录你的 Apple ID，就能在 Android 上看到 iCloud 里的全部照片和视频。
+按月份分组，滚动流畅，可以切换每行显示 3 / 4 / 5 张。
 
-## 📐 架构设计
+**⚡ 边扫边看，不用等**
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        Android (Kotlin + Compose)                      │
-│                                                                        │
-│  [AuthScreen] ──► [ICloudWebView] (官方登录页: .com.cn / .com)          │
-│                          │                                             │
-│                          ▼ (完成密码 + 2FA 认证)                        │
-│                  [CookieManager] (提取 Cookie 字符串)                    │
-│                          │                                             │
-│                          ▼                                             │
-│                  [SessionManager] (DataStore / EncryptedSharedPref)    │
-│                          │                                             │
-│                          ▼ (传输凭证 + 节点标识)                         │
-│                    [AuthViewModel]                                     │
-└──────────────────────────┬─────────────────────────────────────────────┘
-                           │ JNI (Icloudcore.initSession)
-                           ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                        Go 核心层 (go-core)                              │
-│                                                                        │
-│  [InitSession] ──► [HTTP Client & CookieJar] (注入 Header & Origin)    │
-│                           │                                            │
-│                           ▼                                            │
-│   POST https://setup.icloud.com[.cn]/setup/ws/1/accountLogin            │
-│                           │                                            │
-│                           ▼                                            │
-│     解析 webservices 字典 ──► 提取 ckdatabasews.url & dsid               │
-│                           │                                            │
-│                           ▼                                            │
-│      返回 JSON 给 Kotlin ──► 渲染“登录成功 & 节点路由”状态                │
-└──────────────────────────┴─────────────────────────────────────────────┘
-```
+第一次登录后会整理整个图库。你不需要盯着进度条等它跑完 —— 最快的那部分照片会先出现，
+你可以马上开始翻看，剩下的在后台继续整理。
+
+**🔒 登录信息加密保存在手机上**
+
+用 Apple 官方的登录页面输入密码和验证码（和你在浏览器里登录 iCloud 一模一样），
+App 不会看到也不会保存你的密码。登录状态加密存放在手机本地。
+
+**🌏 国内和海外账号都支持**
+
+自动识别中国区（云上贵州）和国际区的 iCloud，不用自己选服务器。
+
+**🖼️ 原图、视频、下载都在**
+
+点开可以看大图；支持视频播放；可以把照片保存到手机相册。
 
 ---
 
-## 🚦 当前进度与 Roadmap
+## 怎么用
 
-- [x] **Phase 0: 基础工程与 gomobile 交叉编译**
-  - [x] Go 核心层模块 (`icloudcore`) 初始化与 `gomobile` 环境打通。
-  - [x] 自动构建脚本 `scripts/build_aar.sh` 实现一键输出 `icloudcore.aar`。
-  - [x] Jetpack Compose + Material 3 + 协程整合，模拟器实机调用 JNI 连通性测试通过。
-- [x] **Phase 1: 混合鉴权与动态路由 (已完成)**
-  - [x] WebView 登录拦截器与 Cookie 强校验（`TOKEN` / `HSA-TRUST` / `PCS-CloudKit`）。
-  - [x] Go 核心层 `/validate` 动态解析 `ckdatabasews.url` 与 `dsid`。
-  - [x] 本地加密 Session 存储与状态流展示。
-  - [x] 真机验证：18 项 Cookie 全部捕获，三要素齐全，`dsid=20118126497`，路由 `https://p203-ckdatabasews.icloud.com.cn:443`，冷启动可静默恢复。
-  - [ ] 遗留项：Token 静默刷新回调、跨子域 Cookie 实测验证（详见 [TODO.md](TODO.md) Phase 1 遗留项）。
+1. **安装 App**，打开后选择你的账号区域（中国大陆 / 国际）
+2. **点击下方按钮**会打开 iCloud 官方登录页，正常输入 Apple ID 和密码
+3. **收到验证码时输入**；如果看到「信任此浏览器」的选项，**建议勾选** —— 这样之后一段时间不用重复登录
+4. 登录成功后会自动开始整理照片库，稍等片刻就能看到照片
 
-> 📖 已修复问题案例、根因分析与验证记录见 **[CHANGELOG_ISSUES.md](CHANGELOG_ISSUES.md)**。
-- [x] **Phase 2: 图库拉取、全库月扫描与月分组本地缓存 (只读预览)**
-- [ ] **Phase 3: Android 相册自动备份 (增量上传与秒传去重)**
-- [ ] **Phase 4: 跨生态深度适配 (Motion Photo / Live Photo 互转)**
+> **关于「信任此浏览器」**
+> 勾选后，iCloud 会记住这台设备 30~60 天。这段时间里你重新打开 App 不需要再登录。
+> 不勾选也能用，只是登录状态会更频繁地过期。
 
 ---
 
-## ⚠️ 关键注意事项与风险规避
+## 常见问题
 
-1. **国区（云上贵州）与国际区 Header 隔离**：
-   - 向苹果发送的所有请求必须严格包含匹配的 `Origin` 与 `Referer`（国区：`https://www.icloud.com.cn`，国际区：`https://www.icloud.com`）。混用会导致 `421 Misdirected Request`。
-2. **2FA 信任凭证 (HSA-TRUST)**：
-   - 登录时用户须勾选“信任此浏览器”，以获得有效期为 30~60 天的 `X-APPLE-WEBAUTH-HSA-TRUST` 凭证用于静默刷新 Token。
-3. **图片下载直链有效期（已实测，见 [ISS-026](CHANGELOG_ISSUES.md#iss-026)）**：
-   - CloudKit 临时下载 URL 的实测寿命为 **~15~18 分钟**（882s 仍 `200`，1065s 变 `410`），
-     **不是** 早前文档所称的 1~2 小时。
-   - **会话重建不会使已签发 URL 失效** —— 实测重建后旧 URL 仍返回 `200`。
-     因此主动换链只看**年龄**（阈值 12 分钟），不靠会话代际。
-   - 加载缓存时仍需以永久静态 `recordName` 作为主键。
-4. **退出登录自动清洗数据层**（已修复，见 [ISS-025](CHANGELOG_ISSUES.md#iss-025)）：
-   - `logout()` 现在会按「阻断 → Room → Coil → Cookie/Vault」顺序完整清洗账号作用域数据。
-   - 因此**不必**再手动去系统设置「清除数据」；切换国区/国际区或更换 Apple ID 后可直接退出重登。
-   - 修复前的症状是：旧账号照片残留、`dsid` 不匹配、直链签名失效导致图片全部加载失败。
+**Q：我的密码会被上传到哪里吗？**
 
-> **背景说明**：照片数据库与图片缓存均以 `recordName` 为主键，这些 ID 属于特定账号。跨账号复用会拿到不属于当前账号的记录，而旧直链又因会话代际变化而失效，最终表现为“列表有内容但图片全部加载失败”。
+不会。登录完全通过 Apple 官方的网页完成，和你在浏览器里登录 iCloud 是同一个页面。
+App 只保存登录成功后 iCloud 发给它的"凭证"，且加密存放在手机本地。
 
-5. **换号未走退出登录也会自动清库**：
-   - `ensureGoSession()` 检测到 `dsid` 变化时主动 `wipeAllData()`，见 [ISS-027](CHANGELOG_ISSUES.md#iss-027-paging-3-remotemediator-导致深翻页跳顶改用月分组本地分页根治)。
-   - 修复前的症状：直接登录另一个 Apple ID 后，界面仍是旧账号照片，新照片全部不可见。
-6. **画廊按「月」分组，扫描是分阶段完成的**：
-   - 首次登录后会全库扫描（`MonthScanEngine`），**边扫边看**；扫描完成后月份标题不再带「· 扫描中」。
-   - 切到后台时由 `MonthScanWorker` 接管，通知栏显示常驻进度。
-   - 若扫到一半中断（网络/切后台），下次启动会自动续扫 —— 游标已持久化，不会重头开始。
+**Q：为什么第一次打开要等一会儿？**
+
+iCloud 上万个文件需要逐个读取。App 会按时间从新到旧整理，
+所以你看到的照片从最近开始 —— 马上就能用，不用等全部完成。
+
+**Q：可以关掉 App 吗？会不会中断？**
+
+可以。切到后台后会在通知栏显示进度并继续工作。
+如果中途被杀掉或断网，下次打开会**接着上次的地方继续**，不会从头再来。
+
+**Q：退出登录后，本地缓存会留下吗？**
+
+不会。退出时会完整清除这个账号在本机保存的照片索引和图片缓存。
+换账号或换区域时直接退出重登即可，**不需要**去系统设置里清除 App 数据。
+
+**Q：现在支持哪些功能？**
+
+目前可以**浏览** iCloud 照片、播放视频、下载到手机相册。
+「把手机本地照片自动备份到 iCloud」还在开发中，目前 Drive 和备忘录也是占位页面。
 
 ---
 
-## 🛠️ 环境要求与构建步骤
+## 目前的进度
 
-### 开发环境要求
-- **Go**: 1.21+ (推荐 1.27)
-- **Java/JDK**: JDK 17+ (建议使用 Android Studio 随附的 JBR)
-- **Android SDK**: API Level 35+, NDK 26+
+| 功能 | 状态 |
+| --- | --- |
+| iCloud 登录（含两步验证） | ✅ 可用 |
+| 浏览照片与视频 | ✅ 可用 |
+| 月分组视图 + 年月快速跳转 | ✅ 可用 |
+| 视频播放 | ✅ 可用 |
+| 保存到手机相册 | ✅ 可用 |
+| 本地相册自动备份到 iCloud | 🚧 开发中 |
+| 动态照片（Live Photo）互转 | 🚧 计划中 |
+| iCloud Drive / 备忘录 | 🚧 计划中 |
 
-### 编译构建流程
+---
 
-1. **打包 Go 核心层 AAR**：
+## 需要知道的事
+
+**照片加载有时会慢一点**
+
+iCloud 不会把照片直接给你，而是给一个限时的下载链接，链接大约 15~18 分钟后就失效。
+App 会自动处理换链，但如果图片加载失败，点一下重试通常就好了。
+
+**扫描大图库需要时间**
+
+如果 iCloud 里有上万张照片，完整整理可能需要几分钟。这是苹果接口的速度限制，
+不是 App 卡住了。
+
+**这是一次性工作，不是实时同步**
+
+App 浏览的是你已经上传到 iCloud 的照片。你在 iPhone 上新拍的照片，
+需要等它上传到 iCloud 之后才能在这里看到。
+
+---
+
+## 安装
+
+目前还没有发布到应用商店，需要通过 Android Studio 自行编译安装。
+
+如果你只是想用，请找提供这个 App 的人要一个安装包（`.apk` 文件），
+在手机上允许"安装未知来源应用"后直接安装即可。
+
+<details>
+<summary>给开发者：如何自行构建</summary>
+
+### 环境要求
+
+- **Go** 1.21+（推荐 1.27）
+- **JDK** 17+（建议使用 Android Studio 随附的 JBR）
+- **Android SDK** API 35+，**NDK** 26+
+
+### 构建步骤
+
+1. 先打包 Go 核心层（首次和每次改动 Go 代码后都要做）：
+
    ```bash
    ./scripts/build_aar.sh
    ```
-   *该脚本会自动检测 JAVA_HOME、ANDROID_HOME 及 ANDROID_NDK_HOME，并在 `app/libs/` 下生成 `icloudcore.aar`。*
 
-2. **编译并部署 Android App**：
+   脚本会自动检测 `JAVA_HOME`、`ANDROID_HOME` 和 `ANDROID_NDK_HOME`，
+   在 `app/libs/` 下生成 `icloudcore.aar`。
+
+2. 编译 APK：
+
    ```bash
    ./gradlew :app:assembleDebug
    ```
 
+   产物在 `app/build/outputs/apk/debug/` 下。
+
+### 技术架构
+
+```
+Android (Kotlin + Jetpack Compose)
+    │
+    │  WebView 官方登录页 → 提取 Cookie → 加密存储
+    │
+    ▼  JNI (gomobile)
+Go 核心层 (go-core)
+    │
+    │  CloudKit 私有协议 (ckdatabasews)
+    ▼
+iCloud 照片服务
+```
+
+- **UI 层**：Jetpack Compose + Material 3，按月分组的 `LazyColumn`
+- **数据层**：Room 本地索引 + Coil 图片加载（缓存 Key 绑 `recordName`）
+- **协议层**：Go 实现 CloudKit `/records/query` 游标分页、`/records/changes` 增量同步
+- **后台任务**：WorkManager + 前台服务，扫描可断点续扫
+
+### 文档
+
+| 文档 | 内容 |
+| --- | --- |
+| [docs/AGENTS.md](docs/AGENTS.md) | 开发规范（**新接手必读** 第 3、4、9 节） |
+| [docs/CHANGELOG_ISSUES.md](docs/CHANGELOG_ISSUES.md) | 已修复问题案例库（ISS-001 ~ ISS-029） |
+| [docs/PITFALLS.md](docs/PITFALLS.md) | 工程避坑指南 |
+| [docs/REFERENCE.md](docs/REFERENCE.md) | CloudKit 字段字典（实测）与开源参考 |
+| [docs/TODO.md](docs/TODO.md) | 分阶段路线图 |
+| [docs/list.md](docs/list.md) | 待修复问题清单 |
+
+</details>
+
 ---
 
-## 📜 许可与参考
+## 致谢
 
-本项目开发参考了以下成熟开源实现：
-- [rclone/rclone](https://github.com/rclone/rclone) - Session 与 HTTP 网络底座
-- [icloud-photos-downloader/icloud_photos_downloader](https://github.com/icloud-photos-downloader/icloud_photos_downloader) - CloudKit `ckdatabasews` 协议与 API 结构字典
+本项目在协议实现上参考了以下开源项目：
+
+- [rclone/rclone](https://github.com/rclone/rclone) —— HTTP 会话与网络底座
+- [icloud-photos-downloader/icloud_photos_downloader](https://github.com/icloud-photos-downloader/icloud_photos_downloader) —— CloudKit 协议与字段结构参考
+
+---
+
+> **免责声明**：本项目为个人开发的第三方客户端，与 Apple Inc. 无关联。
+> 使用前请确保你了解 iCloud 的使用条款，并自行承担账号安全风险。
