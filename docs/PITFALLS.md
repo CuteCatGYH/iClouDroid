@@ -1,8 +1,8 @@
 # 关键工程避坑指南 (必读注意事项)
 
-> 本文档收录 iClouDroid 开发中**必须提前知道**的陷阱。踩过的具体案例见 [CHANGELOG_ISSUES.md](../CHANGELOG_ISSUES.md)。
+> 本文档收录 iClouDroid 开发中**必须提前知道**的陷阱。踩过的具体案例见 [CHANGELOG_ISSUES.md](CHANGELOG_ISSUES.md)。
 >
-> 返回 [TODO.md](../TODO.md)
+> 返回 [TODO.md](TODO.md)
 
 ---
 
@@ -47,7 +47,7 @@
 > **不要用 Paging 3 的 `RemoteMediator` 做这个。** 它在每次 APPEND 成功后无条件
 > invalidate `PagingSource`，重载窗口 = `initialLoadSize`，超出窗口的滚动位置被 clamp，
 > 表现为深翻页跳回顶部。实测塔陷点恒等于 `initialLoadSize`（60→60、360→360、1200→1200），
-> **无参数可解**。详见 [ISS-027](../CHANGELOG_ISSUES.md#iss-027-paging-3-remotemediator-导致深翻页跳顶改用月分组本地分页根治)。
+> **无参数可解**。详见 [ISS-027](CHANGELOG_ISSUES.md#iss-027-paging-3-remotemediator-导致深翻页跳顶改用月分组本地分页根治)。
 
 **滚动锚点用月份，不用全局索引**
 
@@ -58,7 +58,7 @@
 
 ## 3. `downloadURL` 临时直链过期与 Coil 缓存失效问题
 
-> 本节已有**实测数据**，详见 [ISS-026](../CHANGELOG_ISSUES.md#iss-026) 与
+> 本节已有**实测数据**，详见 [ISS-026](CHANGELOG_ISSUES.md#iss-026) 与
 > [url_lifetime_experiment.md](../.artifacts/url_lifetime_experiment.md)。
 
 **问题本质（已实测，推翻旧说法）**
@@ -131,7 +131,7 @@
 
 ## 6. WebView → Go 的 Cookie 传递陷阱
 
-> 详细案例见 [ISS-001](../CHANGELOG_ISSUES.md#iss-001-cookie-值双引号未剥离导致-go-静默丢弃全部凭证)
+> 详细案例见 [ISS-001](CHANGELOG_ISSUES.md#iss-001-cookie-值双引号未剥离导致-go-静默丢弃全部凭证)
 
 **双引号剥离**
 
@@ -156,7 +156,7 @@ value := strings.Trim(strings.TrimSpace(kv[1]), `"`)  // 必须
 
 ## 7. 状态管理的竞态陷阱
 
-> 详细案例见 [ISS-005](../CHANGELOG_ISSUES.md#iss-005-authviewmodel-区域取值三处推断不一致) / [ISS-006](../CHANGELOG_ISSUES.md#iss-006-登录成功后-icloudwebview-重复触发-initsession)
+> 详细案例见 [ISS-005](CHANGELOG_ISSUES.md#iss-005-authviewmodel-区域取值三处推断不一致) / [ISS-006](CHANGELOG_ISSUES.md#iss-006-登录成功后-icloudwebview-重复触发-initsession)
 
 **单一真理源**
 
@@ -176,7 +176,7 @@ Go 结构体的零值（`false` / `""` / `0`）与"业务合法值"无法区分�
 
 ## 8. 退出登录（异步清理）的写回陷阱
 
-> 详细案例见 [ISS-025](../CHANGELOG_ISSUES.md#iss-025)
+> 详细案例见 [ISS-025](CHANGELOG_ISSUES.md#iss-025)
 
 退出登录不是一个瞬间动作，而是一段**异步清理窗口**。在这段窗口里，系统的其他部分仍在正常运行，
 并且会把手里的旧状态重新写回去。已实测的两条写回路径：
@@ -245,7 +245,7 @@ cookieManager.flush()
 
 ## 9. Go map 迭代顺序是随机的
 
-> 详细案例见 [ISS-026](../CHANGELOG_ISSUES.md#iss-026)
+> 详细案例见 [ISS-026](CHANGELOG_ISSUES.md#iss-026)
 
 Go 语言**故意**打乱 `map` 的迭代顺序（防止依赖顺序的实现）。因此任何
 「遍历 map 拼出字符串 → 拿去做相等比较 / 持久化 / 下发给其他语言」的代码都是定时炸弹。
@@ -282,7 +282,7 @@ sort.Strings(keys)
 
 ## 10. 惰性布局嵌套（LazyColumn 内嵌 LazyVerticalGrid）
 
-> 详细案例见 [ISS-027](../CHANGELOG_ISSUES.md#iss-027-paging-3-remotemediator-导致深翻页跳顶改用月分组本地分页根治)
+> 详细案例见 [ISS-027](CHANGELOG_ISSUES.md#iss-027-paging-3-remotemediator-导致深翻页跳顶改用月分组本地分页根治)
 
 画廊最初把每个月做成一个嵌套的 `LazyVerticalGrid`，放在外层 `LazyColumn` 里。
 为了让它能被测量，必须给它一个显式高度：
@@ -334,7 +334,7 @@ LazyColumn {
 
 ## 11. 派生状态不要作为参数传递
 
-> 详细案例见 [ISS-027](../CHANGELOG_ISSUES.md#iss-027-paging-3-remotemediator-导致深翻页跳顶改用月分组本地分页根治)
+> 详细案例见 [ISS-027](CHANGELOG_ISSUES.md#iss-027-paging-3-remotemediator-导致深翻页跳顶改用月分组本地分页根治)
 
 `photo_month_index.isComplete` 表示「全库扫描是否已走完，该月不会再增长」。
 最初的写法是由调用方算出这个值并传进重建函数：
@@ -369,7 +369,7 @@ private suspend fun refreshMonthIndex(yearMonth: Int) {
 
 ## 12. 判断「是否需要初始化」不要看条数
 
-> 详细案例见 [ISS-027](../CHANGELOG_ISSUES.md#iss-027-paging-3-remotemediator-导致深翻页跳顶改用月分组本地分页根治)
+> 详细案例见 [ISS-027](CHANGELOG_ISSUES.md#iss-027-paging-3-remotemediator-导致深翻页跳顶改用月分组本地分页根治)
 
 启动时自动扫描的触发条件原本是「本地照片数为 0」：
 
@@ -388,3 +388,67 @@ repository.totalCountFlow.collect { count ->
 > [!WARNING]
 > 任何「本地数量为 0 就去拉取」的初始化条件，在 schema 升级、部分失败、
 > 账号切换等场景下都会失效。应该判断「数据是否已达到可用状态」，而非「是否存在」。
+
+---
+
+## 13. 一次性返回值不等于对象状态
+
+> 详细案例见 [ISS-029](CHANGELOG_ISSUES.md#iss-029-initsession-未将握手结果回写至-session导致进程内调用拼出空-host)
+
+`InitSession` 调用 `ValidateSession()` 拿到一个 `SessionInitResult`，直接序列化返回，
+**从未把它同步到长期存活的 `Session` 对象**：
+
+```go
+// ❌ 返回值有了，对象还是空的
+result, _ := session.ValidateSession()
+return marshal(result)   // session.DSID / session.CKDatabaseURL 仍为零值
+```
+
+于是 `photosBaseURL()` 读 `s.CKDatabaseURL` 时拿到空串，拼出：
+
+```
+Post "/database/1/.../records/query?...&dsid=&...": unsupported protocol scheme ""
+```
+
+**为何多年没爆**：Kotlin 层读的是返回值，自己存进加密存储。主流程里没人依赖
+`Session` 内部的字段 —— 直到有一次**进程内直接读数据**的调用出现。
+
+> [!IMPORTANT]
+> 任何「调用 → 得到一次性结果对象」的设计，必须明确：谁是真理源？
+> 如果后续代码会读长期对象，就必须在每次成功调用后把结果**回写**进去。
+> 否则错误会在离现场很远的地方、以“空字符串”的形式出现，极难定位。
+
+---
+
+## 14. `/records/query` 的 `resultsLimit` 不能传 1
+
+CloudKit 会直接报错：
+
+```
+400 BAD_REQUEST: Result size limit must be greater than 1
+```
+
+写测试或探针时很容易用 `resultsLimit: 1` “只取一条”，结果是全线失败。
+最小传 **2**，取回后在客户端自行截取。
+
+---
+
+## 15. 探针要跑在进程内，且要避让启动竞争
+
+验证 CloudKit 字段时需要在 **App 进程内**调用（因为 cookie 在加密存储里，外部脚本拿不到）。
+但直接放在 `Application.onCreate` 里会和主流程会话初始化**抢同一个全局 `currentSession`**，
+表现为：`initSession` 明明返回了正确路由，探针却读到空值。
+
+```kotlin
+// ❌ 直接跟启动流程抢
+appScope.launch { Icloudcore.initSession(...); Icloudcore.probeXXX() }
+
+// ✅ 等主流程稳定后再跑
+appScope.launch { Icloudcore.initSession(...); delay(6_000); Icloudcore.probeXXX() }
+```
+
+更稳妥的做法是让探针**自带自愈**：发现 `DSID` / `CKDatabaseURL` 为空就自己重新握手一次。
+
+> [!TIP]
+> 探针代码必须**用完即删**，且用独立文件（如 `probe.go`）+ 编译期 `if (BuildConfig.DEBUG)` 包裹，
+> 避免混入发布包。探针得到的结论写进文档，代码不保留。

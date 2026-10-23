@@ -4,7 +4,7 @@
 >
 > **记录格式**：现象 → 日志证据 → 根因 → 修复方案 → 验证结果。
 >
-> **相关文档**：[TODO.md](TODO.md)（待办与路线图）、[AGENTS.md](AGENTS.md)（Agent 开发规范）、[README.md](README.md)（项目说明）
+> **相关文档**：[TODO.md](TODO.md)（待办与路线图）、[AGENTS.md](AGENTS.md)（Agent 开发规范）、[README.md](../README.md)（项目说明）
 
 ---
 
@@ -40,13 +40,14 @@
 | [ISS-026](#iss-026-cookie-序列化顺序抖动与会话重建即失效的错误假设) | Cookie 序列化顺序抖动与「会话重建即失效」的错误假设 | 🟠 P1 | Go / Android 跨语言 | ✅ 已修复 |
 | [ISS-027](#iss-027-paging-3-remotemediator-导致深翻页跳顶改用月分组本地分页根治) | Paging 3 `RemoteMediator` 导致深翻页跳顶，改用月分组本地分页根治 | 🔴 P0 | Android / UI + Paging | ✅ 已修复 |
 | [ISS-028](#iss-028-go-层缺结构化错误字段导致-kotlin-靠正则猜) | Go 层缺结构化错误字段，导致 Kotlin 靠正则猜 | 🟡 P2 | Go / Android 跨语言 | ✅ 已修复 |
+| [ISS-029](#iss-029-initsession-未将握手结果回写至-session导致进程内调用拼出空-host) | `InitSession` 未将握手结果回写至 `Session`，导致进程内调用拼出空 host | 🟠 P1 | Go 核心层 | ✅ 已修复 |
 
 ---
 
 ## ISS-001：Cookie 值双引号未剥离导致 Go 静默丢弃全部凭证
 
 **优先级**：🔴 P0（阻塞 Phase 1 全部后续工作）
-**归属**：Go 核心层 — `go-core/session.go` → `NewSession()`
+**归属**：Go 核心层 — `../go-core/session.go` → `NewSession()`
 **发现时间**：Phase 1 首次真机联调
 
 ### 现象
@@ -126,7 +127,7 @@ value := strings.Trim(strings.TrimSpace(kv[1]), `"`) // 关键：剥离双引号
 ## ISS-002：`accountLogin` 调用顺序错误返回 400 Missing apple_id field
 
 **优先级**：🔴 P0（阻塞 Phase 1 动态路由解析）
-**归属**：Go 核心层 — `go-core/account.go` → `AccountLogin()`
+**归属**：Go 核心层 — `../go-core/account.go` → `AccountLogin()`
 **发现时间**：Phase 1 首次真机联调（与 ISS-001 同时暴露，ISS-001 修复后依然存在）
 
 ### 现象
@@ -192,7 +193,7 @@ func (s *Session) ValidateSession() (*SessionInitResult, error) {
 ## ISS-003：`SessionInitResult.IsChina` 错误分支未赋值
 
 **优先级**：🟠 P1（数据正确性，不阻塞主流程）
-**归属**：Go 核心层 — `go-core/core.go` → `InitSession()`
+**归属**：Go 核心层 — `../go-core/core.go` → `InitSession()`
 **发现时间**：Phase 1 首次真机联调
 
 ### 现象
@@ -252,7 +253,7 @@ res, _ := json.Marshal(SessionInitResult{
 ## ISS-004：Cookie 跨子域下发规则缺失
 
 **优先级**：🟠 P1（Phase 1 不阻塞，但 **Phase 2 必然踩到**）
-**归属**：Go 核心层 — `go-core/session.go`
+**归属**：Go 核心层 — `../go-core/session.go`
 **发现时间**：Phase 1 代码审查 + 实测验证
 
 ### 现象
@@ -312,7 +313,7 @@ func (s *Session) NewRequest(method, reqURL, body string) (*http.Request, error)
 ## ISS-005：`AuthViewModel` 区域取值三处推断不一致
 
 **优先级**：🟠 P1（存在写错区域的风险）
-**归属**：Android 层 — `app/src/main/java/com/getup/iClouDroid/ui/auth/AuthViewModel.kt`
+**归属**：Android 层 — `../app/src/main/java/com/getup/iClouDroid/ui/auth/AuthViewModel.kt`
 **发现时间**：Phase 1 代码审查
 
 ### 现象
@@ -361,7 +362,7 @@ val isChina = sessionManager.isChinaMainland()
 ## ISS-006：登录成功后 `ICloudWebView` 重复触发 `InitSession`
 
 **优先级**：🟡 P2（性能 + 日志噪音，不阻塞功能）
-**归属**：Android 层 — `app/src/main/java/com/getup/iClouDroid/ui/auth/ICloudWebView.kt`
+**归属**：Android 层 — `../app/src/main/java/com/getup/iClouDroid/ui/auth/ICloudWebView.kt`
 **发现时间**：Phase 1 首次真机联调
 
 ### 现象
@@ -424,7 +425,7 @@ private fun checkCookies(source: String, pageUrl: String?) {
 ## ISS-007：`accountLogin` 补救路径落地与会话过期规范
 
 **优先级**：🔴 P0（保障会话过期后的自愈与错误状态规范）
-**归属**：Go 核心层 — `go-core/account.go` → `TryAccountLoginRemediation()`
+**归属**：Go 核心层 — `../go-core/account.go` → `TryAccountLoginRemediation()`
 **发现时间**：Phase 1 遗留项梳理
 
 ### 现象
@@ -462,7 +463,7 @@ if resp.StatusCode == 421 || resp.StatusCode == 401 {
 ## ISS-008：Token 静默刷新机制与跨语言凭证同步
 
 **优先级**：🟠 P1（防止 Token 续期后 Android 端未同步落盘）
-**归属**：Go / Android 跨语言交互 — `go-core/session.go` & `AuthViewModel.kt`
+**归属**：Go / Android 跨语言交互 — `../go-core/session.go` & `AuthViewModel.kt`
 **发现时间**：Phase 1 遗留项梳理
 
 ### 现象
@@ -489,7 +490,7 @@ if resp.StatusCode == 421 || resp.StatusCode == 401 {
 ## ISS-009：无 Apple ID 回归能力与自动化测试补齐
 
 **优先级**：🟡 P2（工程质量与回归测试保障）
-**归属**：测试基建 — `go-core/session_test.go` & `CookieValidationResultTest.kt`
+**归属**：测试基建 — `../go-core/session_test.go` & `CookieValidationResultTest.kt`
 **发现时间**：Phase 1 遗留项梳理
 
 ### 现象
@@ -690,7 +691,7 @@ private fun isAuthError(jsonStr: String): Boolean {
 ## ISS-014：临时直链失效捕获重试与 ClientID 游标关联断开
 
 **优先级**：🔴 P1（详情页大图/视频/下载可用性）
-**归属**：Go 核心层 (`go-core/photos.go`) & Android 层 (`ICloudPhotoCoil.kt`, `MediaStoreDownloader.kt`)
+**归属**：Go 核心层 (`../go-core/photos.go`) & Android 层 (`ICloudPhotoCoil.kt`, `MediaStoreDownloader.kt`)
 **发现时间**：Phase 2 详情页预览与原图下载实测
 
 ### 现象
@@ -1184,7 +1185,7 @@ if (isAuthError(jsonStr)) {
 
 Go 层 `PhotoPageResult` 目前既无 `errorCode` 也无 `httpStatus` 字段，Kotlin 侧只能靠
 正则从 `errorMessage` 里猜（`\\bHTTP\\s+(?:401|421)\\b`）。建议后续按 `AGENTS.md` 第 12 节
-的技术债条目补齐结构化字段，需同时重新 `./scripts/build_aar.sh`。
+的技术债条目补齐结构化字段，需同时重新 `../scripts/build_aar.sh`。
 
 ---
 
@@ -1406,7 +1407,7 @@ fun logToLogcat(pageUrl: String?, tag: String = AUTH_LOG_TAG) {
 ```
 
 > [!NOTE]
-> 为此在 `app/build.gradle.kts` 开启了 `buildFeatures { buildConfig = true }`。
+> 为此在 `../app/build.gradle.kts` 开启了 `buildFeatures { buildConfig = true }`。
 
 ### 验证结果（三星 SM-F9760 真机，`am force-stop` 后冷启动）
 
@@ -1730,7 +1731,7 @@ suspend fun refreshUrlsForMaster(
 ## ISS-024：Go 层用 `time.Now()` 作排序键兜底，导致照片位置持续漂移
 
 **优先级**：🔴 P0（非跳顶主因，但会造成照片位置漂移）
-**归属**：Go 核心层 — `go-core/photos.go` → `parseRecords()`；Android 防御 `PhotoRepository.parsePhotoItems`
+**归属**：Go 核心层 — `../go-core/photos.go` → `parseRecords()`；Android 防御 `PhotoRepository.parsePhotoItems`
 **发现时间**：Phase 2 深翻页跳顶排查期间
 **对应待办**：P2-017
 
@@ -1740,7 +1741,7 @@ suspend fun refreshUrlsForMaster(
 
 ### 根因
 
-`go-core/photos.go` 有两处用 `time.Now()` 给缺失时间戳的记录兜底，
+`../go-core/photos.go` 有两处用 `time.Now()` 给缺失时间戳的记录兜底，
 而 `assetDate` 是 `ORDER BY assetDate DESC` 的排序键：
 
 ```go
@@ -1777,7 +1778,7 @@ val addedDate = obj.optLong("addedDate", 0L).takeIf { it > 0L } ?: assetDate
 
 ### 验证
 
-`./scripts/build_aar.sh` 成功、`go test ./...` 通过。
+`../scripts/build_aar.sh` 成功、`go test ./...` 通过。
 
 ### 经验教训
 
@@ -1931,7 +1932,7 @@ private suspend fun clearWebViewCookies() = withContext(Dispatchers.Main) {
 **为何旧守卫没能拦住**：`onCookiesExtracted()` 原有的挡位是
 `if (_uiState.value is Authenticating || is LoggedIn) return`。`logout()` 第一时间就把状态
 置为 `NotLoggedIn`，所以这个判断**恰好放行**了竞态回调 —— 典型的「异步状态机挡不住同步回调」
-（见 [docs/PITFALLS.md](docs/PITFALLS.md) §7）。
+（见 [docs/PITFALLS.md](PITFALLS.md) §7）。
 
 **修复**：新增同步哨兵位 `AuthViewModel.isLoggingOut`：
 
@@ -2009,7 +2010,7 @@ fun onCookiesExtracted(result: CookieValidationResult) {
 ## ISS-026：Cookie 序列化顺序抖动与「会话重建即失效」的错误假设
 
 **优先级**：🟠 P1（每次真会话重建都全库标脏，是 P2-008 刷新洪泛的真正来源）
-**归属**：`go-core/session.go` → `BuildCookieHeader()`；
+**归属**：`../go-core/session.go` → `BuildCookieHeader()`；
 `feature/photos/data/PhotoRepository.kt` → `applyRefreshedCookies()` / `ensureGoSession()`；
 `feature/photos/data/image/ICloudPhotoCoil.kt` → `URL_MAX_AGE_MS` / 代际判定
 **发现时间**：ISS-025 验证期间顺带发现
@@ -2299,7 +2300,7 @@ PhotoAssetEntity(..., yearMonth = MonthBucketing.yearMonthOf(assetDate))
 ## ISS-028：Go 层缺结构化错误字段，导致 Kotlin 靠正则猜
 
 **优先级**：🟡 P2（技术债，但被月扫描重构放大为阻塞项）
-**归属**：`go-core/errors.go`（新）、`go-core/photos.go`、`feature/photos/data/PhotoRepository.kt`
+**归属**：`../go-core/errors.go`（新）、`../go-core/photos.go`、`feature/photos/data/PhotoRepository.kt`
 **发现时间**：Phase 2 UI 重构前置
 **对应待办**：原 P2-015
 
@@ -2315,7 +2316,7 @@ Go 侧只返回 `errorMessage` 字符串，Kotlin 只能靠正则/字符串匹�
 
 ### 修复方案
 
-新增 `go-core/errors.go`：
+新增 `../go-core/errors.go`：
 
 ```go
 const (
@@ -2362,4 +2363,95 @@ scanAll stopped early (scanned=6719, cursor kept) - will resume on the next trig
 > 为测试 JSON 解析逻辑，新增了 `testImplementation(libs.json)`（`org.json:json`）。
 > 必须：Android 的 `org.json` 在 JVM 单测环境是**空实现**，每个方法都抛异常，
 > 导致所有用例静默返回 `UNKNOWN`。
+
+---
+
+## ISS-029：`InitSession` 未将握手结果回写至 `Session`，导致进程内调用拼出空 host
+
+**优先级**：🟠 P1（潜伏期长，一旦新增 Go 侧读数据的入口就必现）
+**归属**：`../go-core/core.go` → `InitSession()`
+**发现时间**：照片详情面板可行性探针
+
+### 现象
+
+探针在 App 进程内调用：
+
+```
+initSession -> {"success":true,"dsid":"20118126497",
+                "ckDatabaseUrl":"https://p203-ckdatabasews.icloud.com.cn:443"}
+```
+
+紧接着任何读数据的调用（`/records/query` 等）却失败：
+
+```
+Post "/database/1/com.apple.photos.cloud/production/private/records/query?...&dsid=&...":
+unsupported protocol scheme ""
+```
+
+注意 URL 里 **host 为空、`dsid` 为空**。
+
+### 根因
+
+`InitSession` 拿到 `ValidateSession()` 的返回值后**直接序列化返回**，从未把它同步到
+`session` 结构体：
+
+```go
+// ❌ 修复前
+result, err := session.ValidateSession()
+// ...
+resBytes, _ := json.Marshal(result)
+return string(resBytes)   // session.DSID / session.CKDatabaseURL 仍是零值
+```
+
+而 `photosBaseURL()` 读的是 `s.CKDatabaseURL` 与 `s.DSID`，于是拼出空 host。
+
+### 为何长期未暴露
+
+Kotlin 层读的是 **`InitSession` 的返回值**，自己存进加密存储，下次启动再用 `ensureGoSession`
+重新 init 并把路由信息传入。所以主流程里永远没人依赖 `Session` 内部的这两个字段。
+
+一旦出现**进程内直接调 Go 读数据**的路径（诊断面板、未来 Go 侧新增功能），必现此问题。
+
+### 修复
+
+```go
+// ✅ 握手成功后立即回写
+session.mu.Lock()
+if result.DSID != "" {
+    session.DSID = result.DSID
+}
+if result.CKDatabaseURL != "" {
+    session.CKDatabaseURL = result.CKDatabaseURL
+}
+session.mu.Unlock()
+```
+
+### 验证
+
+修复后同一探针正常返回字段字典与 GPS 数据。
+
+### 经验教训
+
+> [!IMPORTANT]
+> **“返回值”不等于“对象状态”。** 任何一次性结构体返回值都必须同步到长期存活的对象上，
+> 否则调用方一旦改变（从读返回值改为读对象），就会在很远的地方以“空字符串”的形式爆。
+
+---
+
+## 附：CloudKit 字段实测结论
+
+探针成果（字段字典、`mediaMetaDataEnc` 内部结构、GPS 分布、fingerprint 可用性）已归档至：
+
+- [docs/REFERENCE.md 第 2A 节](REFERENCE.md) —— 完整字段字典与实测样本分布
+
+要点：
+
+| 结论 | 影响 |
+| --- | --- |
+| `mediaMetaDataEnc` = base64(binary plist) | 详情面板需引入 plist 解析器（建议 `howett.net/plist`） |
+| 含 `{Exif}` / `{GPS}` / `{TIFF}` / `{PNG}` 子字典 | 光圈/快门/ISO/焦距/镜头/GPS/海拔均可取 |
+| `{GPS}` 仅有定位的照片才有（实测 8/25） | UI 必须按字段存在性条件渲染 |
+| `resOriginalFingerprint` 现成 | **Phase 3 查重无需自己算哈希** |
+| `CPLAsset.locationEnc` 独立存在 | 只判断“有无位置”时不必解码 plist |
+| `/records/query` 的 `resultsLimit` 必须 > 1 | 传 1 直接 400 |
 
