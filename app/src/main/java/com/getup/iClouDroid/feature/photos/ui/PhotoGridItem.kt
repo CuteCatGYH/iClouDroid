@@ -21,6 +21,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -37,7 +39,12 @@ import java.util.Locale
 fun PhotoGridItem(
     photo: PhotoAssetEntity,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /**
+     * Reports this cell's bounds in the window, so the viewer can open from exactly where the
+     * thumbnail is and close back into it.
+     */
+    onBoundsChanged: (androidx.compose.ui.geometry.Rect) -> Unit = {}
 ) {
     val context = LocalContext.current
     val container = rememberAppContainer()
@@ -48,6 +55,13 @@ fun PhotoGridItem(
         modifier = modifier
             .aspectRatio(1f)
             .padding(1.dp)
+            .onGloballyPositioned { coords ->
+                // `boundsInWindow` rather than `boundsInRoot`: the viewer is a sibling overlay in
+                // the same window, so window coordinates are the common frame that needs no
+                // conversion between the grid and the full-screen layer.
+                val rect = coords.boundsInWindow()
+                if (!rect.isEmpty) onBoundsChanged(rect)
+            }
             .background(MaterialTheme.colorScheme.surfaceVariant)
             .clickable(onClick = onClick)
     ) {

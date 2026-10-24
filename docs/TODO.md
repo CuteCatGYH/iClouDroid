@@ -130,6 +130,126 @@
 | 后台扫描崩溃 | **0 次** |
 | `FATAL EXCEPTION` | **0** |
 
+#### 照片详情面板与现代化查看体验 ✅
+
+- [x] **Go 层：EXIF/GPS 解析** — 引入 `howett.net/plist`，新增 `metadata.go`
+  （`FetchPhotoMetadata`，base64(bplist) → 扁平 JSON，含南北纬/东西经符号处理）
+- [x] **数据层：元数据缓存** — `PhotoAssetEntity.exifJson/exifFetchedAt` + Room `MIGRATION_4_5`
+  + `PhotoRepository.fetchMetadata()`（24h TTL、并发去重、负缓存）
+- [x] **双层画质过渡** — 底图复用网格 THUMB 缓存（`cacheOnly` 旁路，零网络零刷新）
+  → 上层 MEDIUM/ORIGINAL 淡入，不再出现加载圈
+- [x] **全屏查看器** — `PhotoViewerScreen`（`HorizontalPager` 月内左右滑动、图/视频混排）
+  + 窗口化 `ExoPlayer`（仅当前页持有解码器）
+- [x] **信息卡片** — `PhotoInfoCard`，按字段存在性逐级降级；无 GPS 则整组隐藏；
+  截图只显示文件行 + 提示文案，**永不空白**
+- [x] **全屏与沉浸模式** — 全屏保留状态栏；单击切换沉浸（隐藏状态栏 + 全部 chrome）
+- [x] **手势** — 双指缩放（以手势中心为锚点）、双击缩放（弹簧动画）、下滑退出、
+  上滑开详情、左右翻页（位移 1/4 屏 **或** 速度 > 600 px/s）
+- [x] **“从哪里来回哪里去”动画与全屏查看器** — 完整修复，共 4 轮迭代
+  - **第1轮** `rememberPagerState` 缓存：重打开固定在第一张 → `key(currentPhotoId)` 隔离 slot
+  - **第2轮** 翻页后关闭回错格子 → `LaunchedEffect(currentAnchor)` 跟随 `settledPage`；
+    首帧 `windowSize` 零尺寸闪烁 → 用 `LocalConfiguration` 预初始化
+  - **第3轮** 动画生硬 → `offset+size` 每帧重新测量改为 `graphicsLayer` 变换（缩放+平移，
+    pager 保持全窗口布局，每帧只变两个 float）；`spring` 改为 320ms `tween`；
+    **背景不再黑屏** → 转场状态上提到 `PhotosScreen`，网格与查看器共用同一 `progress`
+    做互相淡入淡出；查看器背景遮罩封顶 0.72，永不完全不透明
+  - **第4轮** 底栏不隐藏 → `AppShell` 去掉 `Scaffold.bottomBar`（切换该 slot 会让 Compose
+    重置该 slot 内子树的 state，`viewerOpen` 变 stale），改为普通兄弟节点 + 手动预留 80dp
+
+> [!IMPORTANT]
+> **`Scaffold` 的 `bottomBar` / `topBar` 槽位不能做 `if` 条件切换。** 该 slot 的内容一变，
+> Compose 会按 movable-content 规则重置其中子树的 remember 状态，闭包里看到的标志位
+> 会变成stale 值。本项目已因此出现过“底栏挡住信息/下载按钮”的真实 bug。
+> 正确做法：把条件渲染的兄弟节点放在 `Box` 里，需要留白就手动 `PaddingValues` 传入。
+
+> [!WARNING]
+> **转场动画必须用 `graphicsLayer`，不能用 `Modifier.offset` + `Modifier.size`。**
+> 后者会改布局尺寸，全屏 pager 每帧重新测量，动画必卡。
+> 另需注意 `graphicsLayer` 默认轴心在中心，必须 `transformOrigin = TransformOrigin(0f, 0f)`，
+> 否则照片会从中心而非缩略图位置长出。
+
+**模拟器验证**（emulator-5554，15,936 项真实图库）：
+
+| 指标 | 结果 |
+| --- | --- |
+| EXIF 解析 | ✅ `Apple iPhone SE (3rd)` / `1/21s · f/1.8 · 3.99 mm · 28 mm 等效` / `ISO 640` |
+| GPS | ✅ `35.955330, 120.171417` / `27.3 m · 15° 北` |
+| 无 EXIF 降级 | ✅ 截图仅文件行 + 提示，无空占位 |
+| `/records/lookup` 去重 | ✅ 2 张 = 2 次，重复打开不新增 |
+| 会话重建 / 崩溃 / MediaCodec 错误 | ✅ 1 次（冷启动） / 0 / 0 |
+
+> [!NOTE]
+> 以下仍需**实体机**确认：画质过渡实际帧率（模拟器软解不可信）、HDR 高位深降级链
+> （ISS-023 回归）、大图库内存与 I/O 压力。
+
+#### 双向删除同步与全量对账（ISS-030 / ISS-031）✅
+
+前两轮修复解决了“只增不减”的根本问题：**本地图库现在能感知云端删除，也能证明某张照片真的不存在了。**
+
+- [x] **ISS-030：软删除与孤儿 master**
+  - `defaultDesiredKeys` 补上 `isDeleted`（白名单漏一个字段，判断分支永远走不到）
+  - 删除「孤儿 `CPLMaster` 伪造成照片」的逻辑（回收站照片的 master 有 30 天保留期）
+  - 新增 `FetchRecentlyDeleted()`，recordType 为 `CPLAssetAndMasterDeletedByExpungedDate`
+  - `deletedIDs` 同时收集 `recordName` 与 `masterRef`
+- [x] **ISS-031：全盘对账**
+  - Go：`PhotoPageResult` 透出 `DeletedIDs`
+  - Room v6：`scan_seen_ids`（本轮见过的 id + masterId）、v7：`purged_ids`（持久化已删记忆）
+  - `MonthScanEngine`：`runScanLoop` 返回 `ScanRunResult(scanned, walkCompleted)`，
+    `walkCompleted = true` 全代码唯一赋值点 = 云端不再给 `continuationMarker`
+  - `Reconcile.decide()`：保守规则 —— **只要 `masterId` 仍在云端返回，本地行全部保留**
+  - `dataMutationMutex`：对账 / 增量同步 / 回收站清理共用一把锁
+  - 修复多 `CPLAsset` 串写：`updateUrls` 由 `WHERE masterId=` 改为 `WHERE id=`，
+    `getPhotoByMasterId(LIMIT 1)` 改为 `getPhotosByMasterId(全组)`
+
+**真机验证**（SM-F9760）：
+
+| 指标 | 结果 |
+| --- | --- |
+| 完整对账日志 | `reconcile: seen=31795 local=15937 purged=22 keptBySeen=15937` |
+| `photo_assets` / `month_index` 求和 / `scannedCount` | **15937 / 15937 / 15937** 三者一致 |
+| 冷启动 + 手动同步后复活数 | **0** |
+| 同一 master 3 行样本 | **3 行全保留**（保守策略生效） |
+| 断点续扫（中途杀进程）后对账 | `purged=0`，库完好 |
+| `go test` / `testDebugUnitTest` | 全绿 / **137 项** |
+
+> [!CAUTION]
+> **实施中自己踩过的坑（已修复，已在 [ISS-031](CHANGELOG_ISSUES.md#iss-031) 完整复盘）：**
+> 首次验证时中途杀进程触发**断点续扫**，对账误删了 **700 张真实照片**。两层原因：
+> ① `scanAll` 每次启动都清空 `scan_seen_ids`，而续扫只覆盖剩余页 → `seen` 只剩后半段；
+> ② 安全闸门是“≥ 本地 50%”，而“只剩后半段”恰好高于 50%，没拦住。
+> 修复后：scratch 表**仅在全新一轮（`lastMarker == null`）时清空**；闸门改为可推导的
+> **`seenIdCount >= localCount`**（完整 walk 必然成立，不成立即为 id 集不完整的铁证）。
+> 700 行已由后续全量扫描从云端完整回灌 —— 这正是“对账只删本地缓存、从不调云端写接口”的价值。
+
+#### 设置页与周期扫描 ✅
+
+- [x] **设置页**（`ui/settings/`，入口在「账号信息」sheet 的**设置**按钮）
+  - `SettingsCatalog` 声明式登记分组与顺序，`SettingsItem` 是 enum，`SettingsRow` 的 `when` 穷尽
+  - **新增设置项只改三处**（枚举 / 分组 / 渲染分支），漏写分支会编译失败
+  - 存储统一走 `AppSettings`（`SharedPreferences` + `StateFlow`）
+- [x] **全盘扫描入口从主页迁到设置页**
+  - 主页刷新按钮**只做增量同步**（`syncPhotos()`），不再触发全盘扫描
+  - 设置页点击全盘扫描先弹警告：「不要中途强行关闭 App」「中断后本次扫描不生效」
+    「扫到一半退出不损坏数据，下次从断点继续」
+- [x] **周期扫描频率**：日 / 周 / 月 / 关闭 / 自定义（1~365 天，预设 1/2/3/7/14/30/60/90/180）
+  - 预设全部对齐**凌晨 3:00**（`ScanCadence.delayUntilPreferredHour`），首次运行延迟到下一个 3 点
+  - `PeriodicScanScheduler` 使用 `ExistingPeriodicWorkPolicy.UPDATE`（用 `KEEP` 改设置会静默失效）
+  - 与一次性补扫 `ScanScheduler` **使用不同的 uniqueWorkName**（共用会互相取消）
+- [x] **overlay 返回手势**：设置页接 `PredictiveBackHandler`（跟随手指）+ `BackHandler`（兜底）
+  - 侧边手势 / 左上角箭头 / 返回键 **三条路径行为一致**
+  - 修复前侧边手势会直接退出应用（overlay 不是 Activity，系统不知道上面还有一层）
+
+**真机验证**（SM-F9760）：
+
+| 指标 | 结果 |
+| --- | --- |
+| 周期任务入队 | `interval_duration=604800000`（每周），状态 ENQUEUED |
+| 首次运行延迟 | `first run in 399 min`（20:20 → 次日 03:00）✅ |
+| 冷启动恢复 | `Periodic scan scheduled: CUSTOM (14d)` ✅ |
+| 主页刷新日志 | 仅 `Starting incremental sync`，无 `MonthScanEngine` 活动 ✅ |
+| 侧边手势拖满 / 拖一半取消 / 箭头 / 返回键 | 全部正确，`topResumedActivity` 始终 MainActivity ✅ |
+
+
 ### Phase 3: Android 本地相册自动备份 (增量上传)
 
 - [ ] **本地相册监听与云端去重**

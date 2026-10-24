@@ -51,7 +51,14 @@ data class GalleryUiState(
 class PhotosViewModel(application: Application) : AndroidViewModel(application) {
 
     private val container = (application as IClouDroidApp).container
-    private val repository = container.photoRepository
+
+    /**
+     * Exposed for the full-screen viewer, which needs URL re-minting and metadata lookups.
+     *
+     * The UI layer must not call `Icloudcore.*` directly (AGENTS §10); handing over the repository
+     * keeps every Go call funnelled through it.
+     */
+    val repository = container.photoRepository
     private val scanEngine = container.monthScanEngine
 
     /**
@@ -84,8 +91,39 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
     private val _syncMessage = MutableStateFlow<String?>(null)
     val syncMessage: StateFlow<String?> = _syncMessage.asStateFlow()
 
-    private val _selectedPhoto = MutableStateFlow<PhotoAssetEntity?>(null)
-    val selectedPhoto: StateFlow<PhotoAssetEntity?> = _selectedPhoto.asStateFlow()
+    /**
+     * Which photo the full-screen viewer is showing, and the ordered list it came from.
+     *
+     * Replaces the old single `selectedPhoto`. Two things drove that:
+     *  - **One source of truth.** `selectedPhoto` plus a pager index would be two overlapping
+     *    truths about "which photo is open", exactly the duplication PITFALLS §7 warns about.
+     *  - **Paging needs the list.** Swiping left/right requires the surrounding photos, and the
+     *    grid only holds them per-month.
+     *
+     * [photos] tracks the month's Flow while the viewer is open (see [openViewer]), so a month
+     * that is still being scanned can grow underneath the viewer instead of leaving the user
+     * stuck on a stale snapshot at the end of the list.
+     */
+    data class ViewerState(
+        val photos: List<PhotoAssetEntity>,
+        val index: Int
+    ) {
+        val current: PhotoAssetEntity? get() = photos.getOrNull(index)
+    }
+
+    private val _viewer = MutableStateFlow<ViewerState?>(null)
+    val viewer: StateFlow<ViewerState?> = _viewer.asStateFlow()
+
+    /**
+     * The currently open photo, kept for the surrounding UI (download button, download state).
+     *
+     * Derived rather than stored so it can never disagree with [viewer].
+     */
+    val selectedPhoto: StateFlow<PhotoAssetEntity?> = _viewer
+        .map { it?.current }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    private var viewerMonthJob: Job? = null
 
     private val _downloadState = MutableStateFlow<DownloadState>(DownloadState.Idle)
     val downloadState: StateFlow<DownloadState> = _downloadState.asStateFlow()
@@ -204,8 +242,57 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun selectPhoto(photo: PhotoAssetEntity?) {
-        _selectedPhoto.value = photo
+    /**
+     * Opens the full-screen viewer on [photo].
+     *
+     * The list is taken from the photo's own month, so swirling left/right walks the month the user
+     * tapped in — no extra query, and it stays consistent with the grid they came from.
+     */
+    fun openViewer(photo: PhotoAssetEntity) {
+        val month = monthPhotos.value[photo.yearMonth].orEmpty()
+        // The tapped photo may not be in the map yet (a month whose Flow has not emitted). Fall
+        // back to a single-item list rather than refusing to open.
+        val list = if (month.isEmpty()) listOf(photo) else month
+        val index = list.indexOfFirst { it.id == photo.id }.coerceAtLeast(0)
+
+        _downloadState.value = DownloadState.Idle
+        _viewer.value = ViewerState(photos = list, index = index)
+
+        // Keep the list live while the viewer is open: a month still being scanned grows, and the
+        // user should be able to keep swiping into the newly arrived photos.
+        viewerMonthJob?.cancel()
+        viewerMonthJob = viewModelScope.launch {
+            repository.observeMonth(photo.yearMonth).collect { rows ->
+                if (rows.isEmpty()) return@collect
+                _viewer.update { state ->
+                    state ?: return@update null
+                    // Preserve identity across emissions: keep the viewer on the same *photo* even
+                    // if rows were inserted ahead of it, but never jump if it was removed.
+                    val currentId = state.photos.getOrNull(state.index)?.id
+                    val restored = currentId?.let { id -> rows.indexOfFirst { it.id == id } }
+                        ?.takeIf { it >= 0 }
+                    state.copy(
+                        photos = rows,
+                        index = restored ?: state.index.coerceIn(0, (rows.size - 1).coerceAtLeast(0))
+                    )
+                }
+            }
+        }
+    }
+
+    /** Called as the pager settles, so the surrounding UI (download, title) tracks the page. */
+    fun setViewerIndex(index: Int) {
+        _viewer.update { state ->
+            state ?: return@update null
+            if (index !in state.photos.indices) state
+            else state.copy(index = index).also { _downloadState.value = DownloadState.Idle }
+        }
+    }
+
+    fun closeViewer() {
+        viewerMonthJob?.cancel()
+        viewerMonthJob = null
+        _viewer.value = null
         _downloadState.value = DownloadState.Idle
     }
 
@@ -246,14 +333,13 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
 
                 if (result.isSuccess) {
                     val progress = scanEngine.progress.value
-                    // Tell the truth about what just happened. `scanAll` returns success even when
-                    // it stopped early (wipe in progress, unrecoverable session, exhausted
-                    // retries) with the cursor preserved for the next attempt — claiming
-                    // "扫描完成" there was actively misleading over a half-scanned library.
-                    _syncMessage.value = if (progress.isComplete) {
-                        "扫描完成，共 ${progress.scanned} 项"
+                    if (progress.isComplete) {
+                        _syncMessage.value = "正在同步最新照片变更..."
+                        repository.purgeRecentlyDeleted()
+                        repository.syncIncremental(limit = 100)
+                        _syncMessage.value = "同步完成，共 ${totalCount.value} 项"
                     } else {
-                        "已扫描 ${progress.scanned} 项，稍后自动继续"
+                        _syncMessage.value = "已扫描 ${progress.scanned} 项，稍后自动继续"
                     }
                     Log.i(TAG, "Scan finished, complete=${progress.isComplete}, scanned=${progress.scanned}")
                 } else {
@@ -271,15 +357,17 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
-     * Manual sync: pull incremental changes on top of the already-scanned library.
+     * Toolbar refresh: incremental only.
      *
-     * Uses the `syncToken` from `/records/changes` rather than re-walking the cursor, so a refresh
-     * is cheap. Falls back to the full scan when no token exists yet.
+     * Deliberately **never** starts a full walk. A full walk is hundreds of CloudKit round trips
+     * and several minutes of work; putting it behind a one-tap toolbar button meant a user could
+     * accidentally kick one off (and then swipe the app away, leaving `seen` incomplete). It now
+     * lives in Settings, behind an explicit warning. See [startFullScan].
      */
-    fun syncPhotos(isInitial: Boolean = false) {
+    fun syncPhotos() {
         if (_isSyncing.value) return
         _isSyncing.value = true
-        _syncMessage.value = if (isInitial) "正在连接 iCloud 照片库..." else "正在检查增量更新..."
+        _syncMessage.value = "正在检查增量更新..."
 
         viewModelScope.launch {
             try {
@@ -290,24 +378,73 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
                     return@launch
                 }
 
-                val syncResult = if (isInitial) {
-                    _syncMessage.value = "正在扫描照片库..."
-                    scanEngine.scanAll()
-                } else {
-                    _syncMessage.value = "正在同步最新照片变更..."
-                    repository.syncIncremental(limit = 100)
-                }
+                _syncMessage.value = "正在同步最新变更..."
+                repository.purgeRecentlyDeleted()
+                val result = repository.syncIncremental(limit = INCREMENTAL_PAGE_LIMIT)
 
-                if (syncResult.isSuccess) {
-                    val count = syncResult.getOrDefault(0)
-                    _syncMessage.value = "同步完成，新增/更新 $count 项"
-                    Log.i(TAG, "Sync finished, count=$count")
+                if (result.isSuccess) {
+                    val count = result.getOrDefault(0)
+                    _syncMessage.value = if (count > 0) {
+                        "同步完成，变更 $count 项"
+                    } else {
+                        "已是最新，没有新增照片"
+                    }
+                    Log.i(TAG, "Incremental sync finished, count=$count")
                 } else {
-                    val err = syncResult.exceptionOrNull()?.message ?: "同步出现异常"
+                    val err = result.exceptionOrNull()?.message ?: "同步出现异常"
                     _syncMessage.value = "同步失败: $err"
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "syncPhotos exception", e)
+                _syncMessage.value = "异常: ${e.message}"
+            } finally {
+                _isSyncing.value = false
+            }
+        }
+    }
+
+    /**
+     * Settings screen: start (or resume) a full-library walk.
+     *
+     * Runs in `viewModelScope`, and [onScreenLeaving] hands it to WorkManager if the user navigates
+     * away — the walk is resumable, so a background hand-off continues from the same cursor rather
+     * than restarting.
+     */
+    fun startFullScan() {
+        if (_isSyncing.value) return
+        _isSyncing.value = true
+        _syncMessage.value = "正在扫描照片库..."
+
+        scanJob = viewModelScope.launch {
+            try {
+                val zoneReady = repository.checkZoneReady()
+                if (zoneReady.isFailure) {
+                    val err = zoneReady.exceptionOrNull()?.message ?: "PrimarySync 分区未就绪"
+                    _syncMessage.value = "错误: $err"
+                    return@launch
+                }
+
+                val progressJob = launch {
+                    scanEngine.progress.collect { p ->
+                        if (p.isScanning) _syncMessage.value = buildProgressMessage(p)
+                    }
+                }
+
+                val result = scanEngine.scanAll()
+                progressJob.cancel()
+
+                if (result.isSuccess) {
+                    val progress = scanEngine.progress.value
+                    if (progress.isComplete) {
+                        _syncMessage.value = "全盘扫描完成，共 ${totalCount.value} 项"
+                    } else {
+                        _syncMessage.value = "已扫描 ${progress.scanned} 项，稍后自动继续"
+                    }
+                } else {
+                    _syncMessage.value = "扫描失败: ${result.exceptionOrNull()?.message}"
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "startFullScan exception", e)
                 _syncMessage.value = "异常: ${e.message}"
             } finally {
                 _isSyncing.value = false
@@ -357,6 +494,9 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
 
     companion object {
         private const val TAG = "PhotosViewModel"
+
+        /** Change-feed page size for the toolbar refresh (`/records/changes` caps at 200). */
+        private const val INCREMENTAL_PAGE_LIMIT = 100
 
         /**
          * How long a month stays subscribed after leaving the viewport.

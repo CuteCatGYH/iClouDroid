@@ -19,6 +19,7 @@ var defaultDesiredKeys = []string{
 	"addedDate",
 	"isFavorite",
 	"isHidden",
+	"isDeleted",
 	"duration",
 	"orientation",
 	"customRenderedValue",
@@ -79,13 +80,18 @@ type CKQueryResponse struct {
 }
 
 type PhotoItem struct {
-	ID              string `json:"id"`
-	MasterID        string `json:"masterId"`
-	Filename        string `json:"filename"`
-	AssetDate       int64  `json:"assetDate"`
-	AddedDate       int64  `json:"addedDate"`
-	IsFavorite      bool   `json:"isFavorite"`
-	IsHidden        bool   `json:"isHidden"`
+	ID         string `json:"id"`
+	MasterID   string `json:"masterId"`
+	Filename   string `json:"filename"`
+	AssetDate  int64  `json:"assetDate"`
+	AddedDate  int64  `json:"addedDate"`
+	IsFavorite bool   `json:"isFavorite"`
+	IsHidden   bool   `json:"isHidden"`
+	// IsDeleted marks an asset that has been moved to "Recently Deleted". The record still
+	// exists on the server for ~30 days and is therefore returned by every query; the Android
+	// layer must never persist such a row. Without this key in `defaultDesiredKeys` the field is
+	// simply absent from the JSON and the client cannot tell a trashed asset from a live one.
+	IsDeleted       bool   `json:"isDeleted,omitempty"`
 	Duration        int64  `json:"duration"`
 	MediaType       string `json:"mediaType"` // "IMAGE", "VIDEO", "LIVE_PHOTO"
 	ItemType        string `json:"itemType"`
@@ -105,6 +111,11 @@ type PhotoPageResult struct {
 	ContinuationMarker string      `json:"continuationMarker,omitempty"`
 	HasMore            bool        `json:"hasMore"`
 	SyncToken          string      `json:"syncToken,omitempty"`
+	// DeletedIDs carries the ids of records returned in *this* page that are flagged deleted.
+	// They never appear in Photos, but the caller must know about them: a page that silently
+	// drops a deleted asset looks identical to a page that never contained it, and the full
+	// reconciliation walk relies on that difference to purge locally-cached copies.
+	DeletedIDs []string `json:"deletedIds"`
 }
 
 type PhotoChangesResult struct {
@@ -125,6 +136,11 @@ type RefreshedURLs struct {
 type RefreshUrlsResult struct {
 	ResultBase
 	URLs map[string]RefreshedURLs `json:"urls"`
+}
+
+type RecentlyDeletedResult struct {
+	ResultBase
+	DeletedIDs []string `json:"deletedIds"`
 }
 
 // Helper methods to unpack CKField values safely
@@ -325,6 +341,11 @@ func parseRecords(rawRecords []CKRecord) ([]PhotoItem, []string) {
 	for _, rec := range rawRecords {
 		if rec.Deleted || (rec.Fields != nil && rec.Fields["isDeleted"].AsInt64() == 1) {
 			deletedIDs = append(deletedIDs, rec.RecordName)
+			if rec.Fields != nil {
+				if masterRef := rec.Fields["masterRef"].AsMasterRef(); masterRef != "" {
+					deletedIDs = append(deletedIDs, masterRef)
+				}
+			}
 			continue
 		}
 
@@ -385,6 +406,7 @@ func parseRecords(rawRecords []CKRecord) ([]PhotoItem, []string) {
 
 		isFav := asset.Fields["isFavorite"].AsBool()
 		isHidden := asset.Fields["isHidden"].AsBool()
+		isDeleted := asset.Fields["isDeleted"].AsInt64() == 1
 		duration := asset.Fields["duration"].AsInt64()
 
 		item := PhotoItem{
@@ -394,6 +416,7 @@ func parseRecords(rawRecords []CKRecord) ([]PhotoItem, []string) {
 			AddedDate:       addedDate,
 			IsFavorite:      isFav,
 			IsHidden:        isHidden,
+			IsDeleted:       isDeleted,
 			Duration:        duration,
 			MediaType:       "IMAGE",
 			RecordChangeTag: asset.RecordChangeTag,
@@ -426,45 +449,10 @@ func parseRecords(rawRecords []CKRecord) ([]PhotoItem, []string) {
 		photos = append(photos, item)
 	}
 
-	// For any standalone masters that didn't have an asset in this batch,
-	// create items so Android can cache or link them.
-	//
-	// P2-016: these orphans have no CPLAsset, hence no real assetDate. They used to be stamped
-	// with time.Now(), which made the SAME master come back with a NEW sort key on every single
-	// page fetch. Because Android orders by `assetDate DESC`, that pinned every orphan to the top
-	// of the list and re-shuffled it once per APPEND — Room invalidated the PagingSource each time
-	// and the grid visibly jumped back to the top.
-	//
-	// Use a stable 0 instead: it sorts to the bottom (DESC) and, crucially, never changes, so a
-	// master always maps to the same row position across fetches.
-	for mID, m := range masters {
-		if !matchedMasters[mID] {
-			mediaType := "IMAGE"
-			if m.videoComplURL != "" {
-				mediaType = "LIVE_PHOTO"
-			} else if strings.Contains(strings.ToLower(m.itemType), "movie") ||
-				strings.Contains(strings.ToLower(m.itemType), "video") {
-				mediaType = "VIDEO"
-			}
-
-			photos = append(photos, PhotoItem{
-				ID:            mID,
-				MasterID:      mID,
-				Filename:      m.filename,
-				AssetDate:     0, // P2-016: never time.Now() — must be stable across fetches
-				AddedDate:     0,
-				MediaType:     mediaType,
-				ItemType:      m.itemType,
-				Width:         m.width,
-				Height:        m.height,
-				Size:          m.size,
-				ThumbURL:      m.thumbURL,
-				MedURL:        m.medURL,
-				OriginalURL:   m.originalURL,
-				VideoComplURL: m.videoComplURL,
-			})
-		}
-	}
+	// Standalone masters that have no matching CPLAsset in this batch are NOT added as photos.
+	// In iCloud Photos, an active photo is always represented by a CPLAsset. Masters without a CPLAsset
+	// in WithoutHiddenOrDeleted queries belong to deleted (Recently Deleted) or hidden assets whose
+	// CPLMaster payload lingers in CloudKit storage during the 30-day retention window.
 
 	return photos, deletedIDs
 }
@@ -528,12 +516,17 @@ func FetchPhotoPage(continuationMarker string, limit int) string {
 		return marshalPageResult(failBase(ErrCodeParse, resp.StatusCode, "Failed to parse records/query JSON: "+err.Error()))
 	}
 
-	photos, _ := parseRecords(qResp.Records)
+	photos, deletedIDs := parseRecords(qResp.Records)
 	hasMore := qResp.ContinuationMarker != ""
+
+	if deletedIDs == nil {
+		deletedIDs = []string{}
+	}
 
 	res, _ := json.Marshal(PhotoPageResult{
 		ResultBase:         okBase(),
 		Photos:             photos,
+		DeletedIDs:         deletedIDs,
 		ContinuationMarker: qResp.ContinuationMarker,
 		HasMore:            hasMore,
 		SyncToken:          qResp.SyncToken,
@@ -541,11 +534,12 @@ func FetchPhotoPage(continuationMarker string, limit int) string {
 	return string(res)
 }
 
-// marshalPageResult marshals a failure PhotoPageResult with an empty photo list.
+// marshalPageResult marshals a failure PhotoPageResult with empty photo/deleted lists.
 func marshalPageResult(base ResultBase) string {
 	res, _ := json.Marshal(PhotoPageResult{
 		ResultBase: base,
 		Photos:     []PhotoItem{},
+		DeletedIDs: []string{},
 	})
 	return string(res)
 }
@@ -730,6 +724,113 @@ func marshalRefreshResult(base ResultBase) string {
 	res, _ := json.Marshal(RefreshUrlsResult{
 		ResultBase: base,
 		URLs:       make(map[string]RefreshedURLs),
+	})
+	return string(res)
+}
+
+// FetchRecentlyDeleted queries com.apple.photos.cloud for records currently in the "Recently Deleted" album
+func FetchRecentlyDeleted() string {
+	s := GetSession()
+	if s == nil {
+		return marshalRecentlyDeletedResult(failBase(ErrCodeAuthExpired, 0, "No active session"))
+	}
+
+	// Measured trail (each attempt rejected by CloudKit, and the error text is what pinned it):
+	//   1. `recordType: CPLAssetDeletedByExpungedDate`   -> 404 "Did not find record type"
+	//      That identifier is the `indexCountID` used by `HyperionIndexCountLookup` for counts.
+	//   2. `recordType: ...InSmartAlbumByAssetDate`      -> 400 "Expected a parameter with name: smartAlbum"
+	//   3. same + `smartAlbum` (inside `query` and top-level) -> same 400
+	// The list itself is a sibling record type: the count ID and the list ID differ. This mirrors
+	// pyicloud's SMART_FOLDERS entry, where `obj_type` counts and `list_type` lists:
+	//     "Recently Deleted": {"obj_type": "CPLAssetDeletedByExpungedDate",
+	//                         "list_type": "CPLAssetAndMasterDeletedByExpungedDate"}
+	// No `smartAlbum` filter is needed — the record type already scopes the album.
+	queryPayload := map[string]interface{}{
+		"query": map[string]interface{}{
+			"recordType": "CPLAssetAndMasterDeletedByExpungedDate",
+		},
+		"zoneID": map[string]interface{}{
+			"zoneName": "PrimarySync",
+		},
+		"desiredKeys": []string{
+			"recordName",
+			"recordType",
+			"masterRef",
+			"isDeleted",
+		},
+		"resultsLimit": 200,
+	}
+
+	var allDeletedIDs []string
+	continuationMarker := ""
+
+	for {
+		if continuationMarker != "" {
+			queryPayload["continuationMarker"] = continuationMarker
+		} else {
+			delete(queryPayload, "continuationMarker")
+		}
+
+		reqBody, _ := json.Marshal(queryPayload)
+		reqURL := s.photosBaseURL("records/query")
+
+		req, err := s.NewRequest(http.MethodPost, reqURL, string(reqBody))
+		if err != nil {
+			return marshalRecentlyDeletedResult(failBase(ClassifyNetErr(err), 0, err.Error()))
+		}
+
+		resp, err := s.Client.Do(req)
+		if err != nil {
+			return marshalRecentlyDeletedResult(failBase(ClassifyNetErr(err), 0, err.Error()))
+		}
+		s.ExtractAndSaveCookies(resp)
+
+		bodyBytes, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return marshalRecentlyDeletedResult(failBase(ErrCodeNetwork, 0, err.Error()))
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			return marshalRecentlyDeletedResult(failBase(
+				ClassifyHTTPStatus(resp.StatusCode),
+				resp.StatusCode,
+				fmt.Sprintf("records/query HTTP %d: %s", resp.StatusCode, string(bodyBytes)),
+			))
+		}
+
+		var qResp CKQueryResponse
+		if err := json.Unmarshal(bodyBytes, &qResp); err != nil {
+			return marshalRecentlyDeletedResult(failBase(ErrCodeParse, resp.StatusCode, "Failed to parse records/query JSON: "+err.Error()))
+		}
+
+		for _, rec := range qResp.Records {
+			allDeletedIDs = append(allDeletedIDs, rec.RecordName)
+			if rec.Fields != nil {
+				if masterRef := rec.Fields["masterRef"].AsMasterRef(); masterRef != "" {
+					allDeletedIDs = append(allDeletedIDs, masterRef)
+				}
+			}
+		}
+
+		if qResp.ContinuationMarker == "" {
+			break
+		}
+		continuationMarker = qResp.ContinuationMarker
+	}
+
+	res, _ := json.Marshal(RecentlyDeletedResult{
+		ResultBase: okBase(),
+		DeletedIDs: allDeletedIDs,
+	})
+	return string(res)
+}
+
+// marshalRecentlyDeletedResult marshals a failure RecentlyDeletedResult with an empty slice.
+func marshalRecentlyDeletedResult(base ResultBase) string {
+	res, _ := json.Marshal(RecentlyDeletedResult{
+		ResultBase: base,
+		DeletedIDs: []string{},
 	})
 	return string(res)
 }

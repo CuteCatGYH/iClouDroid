@@ -452,3 +452,168 @@ appScope.launch { Icloudcore.initSession(...); delay(6_000); Icloudcore.probeXXX
 > [!TIP]
 > 探针代码必须**用完即删**，且用独立文件（如 `probe.go`）+ 编译期 `if (BuildConfig.DEBUG)` 包裹，
 > 避免混入发布包。探针得到的结论写进文档，代码不保留。
+
+---
+
+## 16. `desiredKeys` 是白名单，少一个字段就少一条分支
+
+CloudKit **只返回 `desiredKeys` 里列出的字段**。少写一个，代码里对应的判断就永远走不到，
+而且**没有任何报错**——表现为“逻辑看着没错，就是不生效”。
+
+最内伤的例子：`defaultDesiredKeys` 包含了 `isHidden`，却漏了 `isDeleted`，
+于是 `rec.Fields["isDeleted"].AsInt64() == 1` 恒为 false，
+“最近删除”的照片被当成正常照片入库（[ISS-030](CHANGELOG_ISSUES.md#iss-030)）。
+
+| 教训 | 做法 |
+| --- | --- |
+| 新增“依据某字段过滤”的行为 | 先确认该字段在 `desiredKeys` 里 |
+| 新增一个 Go 侧结构化字段 | 同步检查 `desiredKeys` + `PhotoItem` + Kotlin 解析三处 |
+| 怀疑字段没生效 | 在 Go 侧打一行日志验证字段是否为空，别在 Kotlin 层猜 |
+
+---
+
+## 17. CloudKit 的“删除”是两段式，tombstone 只在第二段出现
+
+| 阶段 | `CPLAsset` 状态 | `/records/query` | `/records/changes` |
+| --- | --- | --- | --- |
+| 移入「最近删除」 | `isDeleted = 1`，记录**还在** | 通过 `withoutHiddenOrDeleted` 视图过滤掉 | **无变更**（不是 tombstone） |
+| 30 天后 expunge | 记录真正消失 | 不再返回 | 给出 tombstone |
+
+所以：
+
+1. **不能靠增量同步发现“移入回收站”**。必须显式拉回收站索引。
+2. 回收站期内的 `CPLMaster`（含 `downloadURL`）**仍会返回**，`parseRecords` 里
+   “把未配对的 master 伪造成照片”的兼容逻辑会把它变回一张可见照片。详见 `parseRecords`。
+3. 拉回收站的 recordType 是 **`CPLAssetAndMasterDeletedByExpungedDate`**，
+   而 `CPLAssetDeletedByExpungedDate` 只是 `HyperionIndexCountLookup` 的计数 ID
+   （用它查会得到 `404 Did not find record type`）。
+
+> [!CAUTION]
+> 排查这类问题时，依据应是**服务端错误文案**（`404 Did not find record type` /
+> `400 Expected a parameter with name: smartAlbum`），而不是猜参数位置。
+> 本项目为此连续错了三次。
+
+---
+
+## 18. “全量扫描”不等于“能证明缺失”
+
+只做 upsert 的扫描只能回答“云端**有什么**”，回答不了“云端**没有什么**”。
+后者必须靠“本次遍历到的全量 ID 集合”做差集（reconciliation）。
+
+本项目为此踩了两层坑（[ISS-031](CHANGELOG_ISSUES.md#iss-031)）：
+
+1. 扫描只写不删 → 已永久删除的照片永久残留；
+2. 加上对账后，**断点续扫把“本轮”当成了“全集”**，误删 700 张真照片。
+
+### 18.1 带游标的任务：“走完了吗”必须是显式返回值
+
+```kotlin
+// ❌ 函数正常返回 ≠ 遍历完整
+return scanned
+
+// ✅ 把“为什么退出”显式化，只有一个赋值点是 true
+data class ScanRunResult(val scanned: Int, val walkCompleted: Boolean)
+```
+
+本次唯一合法的 `walkCompleted = true` 赋值点：云端不再给 `continuationMarker` 那一页。
+wipe / 401 / 网络放弃 / 协程取消 全部为 `false`。
+
+### 18.2 任何“清理”动作，先问：我看到的是全集还是子集？
+
+最典型的错误是“每次启动都清空 scratch 表”：
+
+```kotlin
+// ❌ 续扫时会把前半段的成果抹掉
+repository.resetSeenIds()
+
+// ✅ 只有全新一轮才清
+if (state.lastMarker == null) repository.resetSeenIds()
+```
+
+### 18.3 安全闸门的判据要“可推导”，不要拍百分比
+
+```kotlin
+// ❌ 50% 阈值拦不住“只剩后半段”（一半恰好高于 50%）
+seenIdCount >= localCount * 0.5
+
+// ✅ 完整 walk 必然满足：每行本地记录至少贡献一个 id 到 seen
+seenIdCount >= localCount
+```
+
+推导成立的前提很简单：`scan_seen_ids` 同时记录 `id` 与 `masterId`。
+任何不满足该不等式的情况，都是“id 集不完整”的铁证，与原因无关。
+
+### 18.4 “误删可恢复”要当成设计约束
+
+对账只删本地缓存，**从不调云端写接口**。所以误删的最大代价是“重扫一遍”。
+本次 700 行被误删后，清 `scan_state` 重跑全量扫描即全部回灌（15937 恢复）。
+
+> [!TIP]
+> 选方案时的判断依据：**误删一张的代价 ≫ 漏删一张的代价**。
+> 所以不要因为“怕误删”而放弃对账；正确做法是把闸门做严、把误删做成可回灌。
+
+---
+
+## 19. 同一 `masterId` 可对应多条 `CPLAsset`
+
+实测库中 155 行属于这种结构（编辑版本 / 重复导入 / 服务端重映射）：
+
+```sql
+SELECT id, filename, assetDate FROM photo_assets WHERE masterId='ASiWjzUxvNN81ZXosCMKLSKZYkFK';
+54FBED04-…|IMG_1882.JPG|2024-10-06 22:54:15
+79072B11-…|IMG_1882.JPG|2024-08-21 18:05:07
+9F987577-…|IMG_1882.JPG|2024-08-09 16:11:28
+```
+
+后果：只要是 `WHERE masterId = ? LIMIT 1` 或 `UPDATE ... WHERE masterId = ?`，
+就会导致“三张不同缩略图共用一组签名”、“读到随机一行”。
+
+| 错误写法 | 正确写法 |
+| --- | --- |
+| `UPDATE ... WHERE masterId = :id` | `UPDATE ... WHERE id = :assetId`（逐行） |
+| `getPhotoByMasterId()` + `LIMIT 1` | `getPhotosByMasterId()` 取全组，或按 assetId 精确取 |
+
+> [!IMPORTANT]
+> **主键是 `id`（assetId），不是 `masterId`。** `/records/lookup` 按 master 回答、
+> Coil 缓存 Key 按 assetId——两者维度不同，回写时必须按 assetId 展开到每一行。
+> 清理多余行时应保守：**只要 `masterId` 仍在云端返回，就不删。**
+
+---
+
+## 20. Compose 里的“新页面”不自动获得返回语义
+
+本项目没有导航图：设置页、照片查看器都是 **overlay**（一个布尔状态 + 条件渲染）。
+Compose 和 Activity 都不知道“上面又压了一层”，返回事件会直接落到 `MainActivity` ——
+**表现为侧边手势直接退出应用**，而左上角箭头（自己调的 `onClose`）却是对的。
+
+### 三条返回路径必须都接
+
+| 路径 | 需要什么 |
+| --- | --- |
+| 侧边手势 | `PredictiveBackHandler`（或至少 `BackHandler`） |
+| 自画返回箭头 | `onBack = { ... }` |
+| 硬件 / 普通返回键 | `BackHandler` |
+
+### 想要预测返回效果，就只用 `BackHandler` 是不够的
+
+`BackHandler` 只在手势**结束时**触发：拖动全程面板纹丝不动，系统却已在画预览快照，
+观感割裂。`PredictiveBackHandler` 会持续汇报 0..1 进度，面板就能跟随手指。
+
+两个 handler 可以同时 `enabled = true`：同一次手势只会被其中一个消费，
+预测返回不可用时后者兵底。不需要额外探测系统能力。
+
+### 动画只用 `graphicsLayer`
+
+```kotlin
+// ❌ 改变布局尺寸 → 每帧重新测量整个列表
+Modifier.offset { IntOffset(x, 0) }
+
+// ✅ 绘制阶段平移 + 淡出
+Modifier.graphicsLayer { translationX = p * travelPx; alpha = 1f - p * 0.6f }
+```
+
+### 必备工程保障：提前注册
+
+两个 handler 都要**提前注册**，且注册位置要能访问到控制显隐的那个状态。
+本项目把设置页包成 `SettingsContainer`，就是为了让 `BackHandler` 和 `settingsOpen`
+处于同一个作用域，而不是从子组件往上抬回调。

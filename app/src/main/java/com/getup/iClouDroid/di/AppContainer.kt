@@ -2,6 +2,7 @@ package com.getup.iClouDroid.di
 
 import android.content.Context
 import com.getup.iClouDroid.data.session.SessionManager
+import com.getup.iClouDroid.data.settings.AppSettings
 import com.getup.iClouDroid.feature.photos.data.MonthScanEngine
 import com.getup.iClouDroid.feature.photos.data.PhotoDatabase
 import com.getup.iClouDroid.feature.photos.data.PhotoRepository
@@ -22,6 +23,19 @@ class AppContainer(private val appContext: Context) {
     val sessionManager: SessionManager by lazy {
         SessionManager(appContext)
     }
+
+    /**
+     * User preferences.
+     *
+     * Lives here (not in a feature package) because settings are app-wide: the periodic scan
+     * scheduler, the settings screen, and any future feature all read the same instance.
+     */
+    val appSettings: AppSettings by lazy {
+        AppSettings(appContext)
+    }
+
+    /** App context, for the schedulers that need it without holding an Activity. */
+    val context: Context get() = appContext
 
     private val photoDatabase: PhotoDatabase by lazy {
         PhotoDatabase.getInstance(appContext)

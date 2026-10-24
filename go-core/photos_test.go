@@ -182,6 +182,20 @@ func TestFetchChanges(t *testing.T) {
 					{
 						"recordName": "deleted-asset-99",
 						"deleted": true
+					},
+					{
+						"recordName": "trashed-asset-98",
+						"recordType": "CPLAsset",
+						"fields": {
+							"isDeleted": {
+								"value": 1,
+								"type": "INT64"
+							},
+							"masterRef": {
+								"value": {"recordName": "master-uuid-98"},
+								"type": "REFERENCE"
+							}
+						}
 					}
 				],
 				"syncToken": "updated-sync-token",
@@ -212,8 +226,8 @@ func TestFetchChanges(t *testing.T) {
 	if changes.SyncToken != "updated-sync-token" {
 		t.Errorf("unexpected syncToken: %s", changes.SyncToken)
 	}
-	if len(changes.DeletedIDs) != 1 || changes.DeletedIDs[0] != "deleted-asset-99" {
-		t.Errorf("unexpected deleted IDs: %+v", changes.DeletedIDs)
+	if len(changes.DeletedIDs) != 3 {
+		t.Errorf("expected 3 deleted IDs, got %d: %+v", len(changes.DeletedIDs), changes.DeletedIDs)
 	}
 }
 
@@ -264,5 +278,170 @@ func TestRefreshAssetUrls(t *testing.T) {
 	}
 	if masterUrls.ThumbURL != "https://cvws.example.com/fresh-thumb.jpg" {
 		t.Errorf("unexpected thumbUrl: %s", masterUrls.ThumbURL)
+	}
+}
+
+func TestOrphanMastersNotAdded(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "records/query") {
+			w.WriteHeader(http.StatusOK)
+			// Return ONLY a CPLMaster (orphan from trash/deleted asset)
+			w.Write([]byte(`{
+				"records": [
+					{
+						"recordName": "orphan-master-uuid",
+						"recordType": "CPLMaster",
+						"fields": {
+							"itemType": {"value": "public.heic", "type": "STRING"},
+							"filenameEnc": {"value": "SU1HXzAwMDEuSEVJQw==", "type": "ENCRYPTED_BYTES"}
+						}
+					}
+				],
+				"continuationMarker": ""
+			}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	session, err := NewSession("test=cookie", true)
+	if err != nil {
+		t.Fatalf("NewSession failed: %v", err)
+	}
+	session.CKDatabaseURL = ts.URL
+	session.DSID = "12345678"
+
+	pageJSON := FetchPhotoPage("", 50)
+	var page PhotoPageResult
+	if err := json.Unmarshal([]byte(pageJSON), &page); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	if !page.Success {
+		t.Fatalf("expected success, got %s", page.ErrorMessage)
+	}
+	if len(page.Photos) != 0 {
+		t.Errorf("expected 0 photos for orphan master, got %d", len(page.Photos))
+	}
+}
+
+// A page that contains a trashed asset must report it in DeletedIDs instead of dropping it
+// silently: the reconciliation walk needs to know the id was seen-but-deleted in order to purge
+// any locally cached copy.
+func TestFetchPhotoPageReportsDeletedIds(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "records/query") {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{
+				"records": [
+					{
+						"recordName": "live-asset-1",
+						"recordType": "CPLAsset",
+						"fields": {
+							"masterRef": {"value": {"recordName": "live-master-1"}, "type": "REFERENCE"},
+							"assetDate": {"value": 1690000000000, "type": "TIMESTAMP"}
+						}
+					},
+					{
+						"recordName": "live-master-1",
+						"recordType": "CPLMaster",
+						"fields": {"itemType": {"value": "public.heic", "type": "STRING"}}
+					},
+					{
+						"recordName": "trashed-asset-2",
+						"recordType": "CPLAsset",
+						"fields": {
+							"isDeleted": {"value": 1, "type": "INT64"},
+							"masterRef": {"value": {"recordName": "trashed-master-2"}, "type": "REFERENCE"}
+						}
+					}
+				],
+				"continuationMarker": ""
+			}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	session, err := NewSession("test=cookie", true)
+	if err != nil {
+		t.Fatalf("NewSession failed: %v", err)
+	}
+	session.CKDatabaseURL = ts.URL
+	session.DSID = "12345678"
+
+	pageJSON := FetchPhotoPage("", 50)
+	var page PhotoPageResult
+	if err := json.Unmarshal([]byte(pageJSON), &page); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	if !page.Success {
+		t.Fatalf("expected success, got %s", page.ErrorMessage)
+	}
+	if len(page.Photos) != 1 || page.Photos[0].ID != "live-asset-1" {
+		t.Errorf("expected only the live asset in Photos, got %+v", page.Photos)
+	}
+	if len(page.DeletedIDs) != 2 {
+		t.Fatalf("expected 2 deleted ids (asset + master), got %d: %+v", len(page.DeletedIDs), page.DeletedIDs)
+	}
+	seen := map[string]bool{}
+	for _, id := range page.DeletedIDs {
+		seen[id] = true
+	}
+	if !seen["trashed-asset-2"] || !seen["trashed-master-2"] {
+		t.Errorf("missing expected deleted ids: %+v", page.DeletedIDs)
+	}
+	if page.HasMore {
+		t.Errorf("expected hasMore=false when continuationMarker is absent")
+	}
+}
+
+func TestFetchRecentlyDeleted(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "records/query") {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{
+				"records": [
+					{
+						"recordName": "recently-deleted-asset-1",
+						"recordType": "CPLAsset",
+						"fields": {
+							"isDeleted": {"value": 1, "type": "INT64"},
+							"masterRef": {
+								"value": {"recordName": "recently-deleted-master-1"},
+								"type": "REFERENCE"
+							}
+						}
+					}
+				],
+				"continuationMarker": ""
+			}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	session, err := NewSession("test=cookie", true)
+	if err != nil {
+		t.Fatalf("NewSession failed: %v", err)
+	}
+	session.CKDatabaseURL = ts.URL
+	session.DSID = "12345678"
+
+	delJSON := FetchRecentlyDeleted()
+	var delRes RecentlyDeletedResult
+	if err := json.Unmarshal([]byte(delJSON), &delRes); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	if !delRes.Success {
+		t.Fatalf("expected success, got %s", delRes.ErrorMessage)
+	}
+	if len(delRes.DeletedIDs) != 2 {
+		t.Errorf("expected 2 deleted IDs (asset + master), got %d: %+v", len(delRes.DeletedIDs), delRes.DeletedIDs)
 	}
 }

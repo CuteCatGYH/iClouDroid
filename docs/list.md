@@ -2,7 +2,7 @@
 
 > 本文件只保留**尚未修复**的问题与持续性工程注意事项。
 >
-> 已修复案例请见 [CHANGELOG_ISSUES.md](CHANGELOG_ISSUES.md)（ISS-001 ~ ISS-028）。
+> 已修复案例请见 [CHANGELOG_ISSUES.md](CHANGELOG_ISSUES.md)（ISS-001 ~ ISS-029）。
 >
 > 相关文档：[TODO.md](TODO.md)（路线图）、[CHANGELOG_ISSUES.md](CHANGELOG_ISSUES.md)（已修复归档）
 

@@ -27,7 +27,24 @@ data class ICloudImageModel(
     val url: String?,
     val fetchedAt: Long,
     val sessionGeneration: Int = 0,
-    val quality: Quality = Quality.THUMB
+    val quality: Quality = Quality.THUMB,
+    /**
+     * When true the request may only be served from an existing cache entry.
+     *
+     * This exists for the full-screen viewer's *base* layer: it deliberately asks for the same
+     * `THUMB` cache key the grid already populated, so opening a photo paints instantly from the
+     * in-memory bitmap instead of flashing a spinner. Because it is a pure cache read, it must not
+     * trigger a `/records/lookup`: a miss simply fails and the sharp layer above it covers the
+     * screen, so spending a network round trip on it would only contend with the real request.
+     *
+     * In particular this is what keeps a cold URL (expired signature) from producing *two* lookups
+     * per opened photo — the base layer would otherwise re-mint concurrently with the sharp layer.
+     *
+     * NOTE: this cannot be enforced by the interceptor alone; the request must also disable
+     * network reads (`ImageRequest.networkCachePolicy(ENABLED/DISABLED)` is controlled by the
+     * caller). The interceptor's job is only to not mint a URL on the way in.
+     */
+    val cacheOnly: Boolean = false
 ) {
     enum class Quality { THUMB, MEDIUM, ORIGINAL }
 
@@ -42,6 +59,10 @@ data class ICloudImageModel(
                 quality = quality
             )
         }
+
+        /** Builds the cache-only base layer used by the full-screen viewer. */
+        fun cacheOnlyThumb(entity: PhotoAssetEntity): ICloudImageModel =
+            fromEntity(entity, Quality.THUMB).copy(cacheOnly = true)
 
         fun pickUrl(entity: PhotoAssetEntity, quality: Quality): String? = when (quality) {
             Quality.THUMB -> entity.thumbUrl ?: entity.medUrl ?: entity.originalUrl
@@ -117,6 +138,14 @@ class ICloudPhotoInterceptor(
         }
 
         val stableKey = "icloud_${data.recordName}_${data.quality.name.lowercase()}"
+
+        // Cache-only base layer: never mint a URL, never retry. A miss is fine — this layer exists
+        // solely to paint an already-decoded bitmap instantly under the sharp layer, and firing a
+        // refresh here would race the sharp layer's own lookup for no visual gain.
+        if (data.cacheOnly) {
+            return chain.proceed(buildRequest(request, data.url, stableKey))
+        }
+
         val currentGeneration = sessionManager.getSessionGeneration()
         val generationStale = data.sessionGeneration != currentGeneration
         val ageMs = System.currentTimeMillis() - data.fetchedAt
@@ -336,6 +365,30 @@ object ICloudImageLoaderFactory {
                 false
             }
         }
+
+    /**
+     * Evicts specific assets from both memory and disk caches.
+     *
+     * Used when photos are deleted remotely so deleted thumbnails and previews
+     * do not linger in Coil caches.
+     */
+    @OptIn(coil.annotation.ExperimentalCoilApi::class)
+    fun evictAssets(recordNames: Collection<String>) {
+        if (recordNames.isEmpty()) return
+        val loader = INSTANCE ?: return
+        try {
+            val qualities = listOf("thumb", "med", "original")
+            for (name in recordNames) {
+                for (q in qualities) {
+                    val key = "icloud_${name}_$q"
+                    loader.memoryCache?.remove(coil.memory.MemoryCache.Key(key))
+                    loader.diskCache?.remove(key)
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to evict assets from Coil cache: ${e.message}")
+        }
+    }
 
     private const val TAG = "ICloudPhotoCoil"
 }

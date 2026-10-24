@@ -60,6 +60,10 @@ class MainActivity : ComponentActivity() {
                     val authState by authViewModel.uiState.collectAsState()
                     var showAccountDialog by remember { mutableStateOf(false) }
 
+                    // Settings is a full-screen overlay owned by the shell, but the entry point
+                    // (账号信息 sheet) lives one level up, so the request is hoisted here.
+                    var openSettings by remember { mutableStateOf(false) }
+
                     when (val state = authState) {
                         // P2-013: 'else -> AuthScreen' used to swallow this transient state and
                         // speculatively build the login WebView. Route it out explicitly so the
@@ -78,6 +82,8 @@ class MainActivity : ComponentActivity() {
                             // to the shell, which owns section switching (photos / drive / notes).
                             AppShell(
                                 photosViewModel = photosViewModel,
+                                openSettings = openSettings,
+                                onOpenSettingsHandled = { openSettings = false },
                                 onOpenAccountInfo = { showAccountDialog = true }
                             )
 
@@ -85,6 +91,10 @@ class MainActivity : ComponentActivity() {
                                 AccountInfoDialog(
                                     state = state,
                                     onDismiss = { showAccountDialog = false },
+                                    onOpenSettings = {
+                                        showAccountDialog = false
+                                        openSettings = true
+                                    },
                                     onLogout = {
                                         showAccountDialog = false
                                         authViewModel.logout()

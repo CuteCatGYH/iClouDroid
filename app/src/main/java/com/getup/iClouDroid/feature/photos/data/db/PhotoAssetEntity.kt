@@ -57,5 +57,27 @@ data class PhotoAssetEntity(
      * `0` means "not yet bucketed". That happens for rows written before the v4 migration and
      * for rows the scanner has not reached yet; [MonthScanEngine] backfills them.
      */
-    val yearMonth: Int = 0
+    val yearMonth: Int = 0,
+
+    /**
+     * Resolved EXIF/GPS for this asset, as the flat JSON emitted by `icloudcore.FetchPhotoMetadata`.
+     *
+     * Three states, all meaningful:
+     *  - `null` — never fetched. The info panel loads it on demand.
+     *  - `""`   — fetched, and the record genuinely has no `mediaMetaDataEnc` (third-party imports,
+     *    some screenshots). Cached as a negative result so the panel never asks twice.
+     *  - JSON   — parsed metadata; absent fields are absent from the JSON too, never zero-filled.
+     *
+     * Deliberately NOT part of the scan path: `mediaMetaDataEnc` runs 742–3859 bytes per record,
+     * which would add over a hundred megabytes across a full 15k-item `/records/query` walk.
+     */
+    val exifJson: String? = null,
+
+    /**
+     * When [exifJson] was written (0 = never).
+     *
+     * Doubles as the "is this a cached miss?" marker, so [PhotoRepository.fetchMetadata] can
+     * answer from the database without a network round trip.
+     */
+    val exifFetchedAt: Long = 0
 )

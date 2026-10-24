@@ -6,6 +6,8 @@ import com.getup.iClouDroid.feature.photos.data.db.PhotoMonthIndexDao
 import com.getup.iClouDroid.feature.photos.data.db.PhotoMonthIndexEntity
 import com.getup.iClouDroid.feature.photos.data.db.ScanStateDao
 import com.getup.iClouDroid.feature.photos.data.db.ScanStateEntity
+import com.getup.iClouDroid.feature.photos.data.db.SyncStateDao
+import com.getup.iClouDroid.feature.photos.data.db.SyncStateEntity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -76,6 +78,7 @@ class MonthScanEngine(
     private val photoDao: PhotoDao = database.photoDao()
     private val monthIndexDao: PhotoMonthIndexDao = database.photoMonthIndexDao()
     private val scanStateDao: ScanStateDao = database.scanStateDao()
+    private val syncStateDao: SyncStateDao = database.syncStateDao()
 
     /** Serialises concurrent triggers (foreground VM + WorkManager). */
     private val scanMutex = Mutex()
@@ -115,6 +118,11 @@ class MonthScanEngine(
 
             var state = loadOrCreateState()
 
+            val purgedOrphans = photoDao.deleteOrphanRows()
+            if (purgedOrphans > 0) {
+                Log.i(TAG, "Purged $purgedOrphans legacy orphan rows before scanning")
+            }
+
             // v4 migration left every pre-existing row at yearMonth = 0, and an interrupted scan
             // may have left the same. Bucket them BEFORE deciding whether there is anything to do:
             // otherwise an install that already fetched photos shows a populated count but an
@@ -133,7 +141,19 @@ class MonthScanEngine(
                 return@withContext Result.success(0)
             }
 
-            val written = runScanLoop(state, batchSize)
+            // `scan_seen_ids` must only be cleared when a *fresh* walk is about to start.
+            //
+            // A resumed walk (cursor kept from an interrupted run) covers only the remaining
+            // pages, so clearing the table there leaves `seen` holding the tail of the library and
+            // makes the reconcile pass delete everything the earlier pages covered. Measured cost
+            // of getting this wrong: 700 legitimate photos purged after a mid-scan kill.
+            if (state.lastMarker == null) {
+                repository.resetSeenIds()
+            } else {
+                Log.d(TAG, "resuming walk - keeping earlier page ids in scan_seen_ids")
+            }
+
+            val run = runScanLoop(state, batchSize)
 
             // Rows can also arrive outside the scan loop — `syncIncremental` upserts them directly,
             // and a run that stopped early may have written some that were never bucketed. Sweep
@@ -148,21 +168,30 @@ class MonthScanEngine(
             // exhausted transient retries. Treating any of those as "done" produced a "扫描完成"
             // banner over a half-scanned library and left the newest months flagged incomplete.
             val finalState = loadOrCreateState()
-            val finished = finalState.isComplete
-            if (finished) {
+            if (run.walkCompleted) {
                 // Belt and braces. `runScanLoop` stamps every month complete when it exits normally,
                 // but a run that completed on an earlier build (or one whose final sweep was
                 // interrupted) leaves months stuck at isComplete = 0 — which the UI renders as
                 // "扫描中" forever, on a library that is demonstrably finished.
                 markAllMonthsComplete()
+
+                // Only a walk CloudKit declared finished may be used to prove absence (ISS-031).
+                // A transient failure must never be allowed to delete anything.
+                val reconciled = repository.reconcileWithSeenIds()
+                if (reconciled.isFailure) {
+                    Log.w(
+                        TAG,
+                        "reconcile did not run: ${reconciled.exceptionOrNull()?.message}"
+                    )
+                }
             } else {
                 Log.w(
                     TAG,
                     "scanAll stopped early (scanned=${finalState.scannedCount}, cursor kept) - " +
-                        "will resume on the next trigger"
+                        "will resume on the next trigger; reconciliation skipped"
                 )
             }
-            Result.success(if (finished) written else 0)
+            Result.success(if (run.walkCompleted) run.scanned else 0)
         } catch (e: CancellationException) {
             // Cancellation is not a failure: the cursor is already persisted, so the next run
             // resumes. Rethrow so structured concurrency behaves.
@@ -176,11 +205,28 @@ class MonthScanEngine(
         }
     }
 
+    /**
+     * How one visit to the cursor ended.
+     *
+     * [walkCompleted] is the single load-bearing signal for reconciliation (ISS-031): it is true
+     * **only** when CloudKit itself declared the end of the result set. Every early exit — wipe in
+     * progress, unrecoverable session, exhausted transient retries, coroutine cancellation — reports
+     * false, because in those cases the set of ids seen so far is incomplete and using it to delete
+     * cached rows would wipe the library.
+     *
+     * `scan_state.isComplete` deliberately plays no part here: it is written per page and can be
+     * left in a half-true state by the very early exits listed above.
+     */
+    internal data class ScanRunResult(
+        val scanned: Int,
+        val walkCompleted: Boolean
+    )
+
     // ------------------------------------------------------------------------------------------
     // Core loop
     // ------------------------------------------------------------------------------------------
 
-    private suspend fun runScanLoop(initial: ScanStateEntity, batchSize: Int): Int {
+    private suspend fun runScanLoop(initial: ScanStateEntity, batchSize: Int): ScanRunResult {
         var state = initial
         var marker = state.lastMarker ?: ""
         var scanned = state.scannedCount
@@ -195,7 +241,7 @@ class MonthScanEngine(
         )
 
         while (true) {
-            if (repository.isWipeInProgress()) return scanned
+            if (repository.isWipeInProgress()) return ScanRunResult(scanned, walkCompleted = false)
 
             val fetched = repository.fetchScanPage(marker, batchSize)
 
@@ -214,7 +260,7 @@ class MonthScanEngine(
                         val rebuilt = repository.ensureGoSession(force = true)
                         if (rebuilt.isFailure) {
                             Log.e(TAG, "scan aborted - session rebuild failed")
-                            return scanned
+                            return ScanRunResult(scanned, walkCompleted = false)
                         }
                         state = state.copy(lastMarker = null, scannedCount = scanned)
                         persistState(state)
@@ -228,7 +274,7 @@ class MonthScanEngine(
                         attempt += 1
                         if (attempt > MAX_TRANSIENT_RETRIES) {
                             Log.w(TAG, "scan giving up after $attempt transient failures: ${classified.message}")
-                            return scanned
+                            return ScanRunResult(scanned, walkCompleted = false)
                         }
                         val backoff = backoffMs(attempt)
                         Log.w(
@@ -242,7 +288,7 @@ class MonthScanEngine(
 
                     else -> {
                         Log.e(TAG, "scan failed (${classified.kind}): ${classified.message}")
-                        return scanned
+                        return ScanRunResult(scanned, walkCompleted = false)
                     }
                 }
             }
@@ -250,14 +296,13 @@ class MonthScanEngine(
             val page = fetched.getOrThrow()
             attempt = 0
 
-            if (page.photos.isNotEmpty()) {
-                val entities = page.photos.map { it.copy(yearMonth = MonthBucketing.yearMonthOf(it.assetDate)) }
-                photoDao.upsertAll(entities)
+            // Writes the page, records its ids for the reconcile pass, and purges anything CloudKit
+            // returned as `isDeleted`. Kept in the repository so the three steps share one lock.
+            val written = repository.recordScanPage(page)
 
+            if (written > 0) {
+                val entities = page.entities
                 val touchedMonths = entities.map { it.yearMonth }.distinct()
-                for (ym in touchedMonths) {
-                    refreshMonthIndex(ym)
-                }
 
                 scanned += entities.size
                 state = state.copy(
@@ -272,9 +317,8 @@ class MonthScanEngine(
                     isScanning = true,
                     scanned = scanned,
                     estimatedTotal = state.estimatedTotal,
-                    currentYearMonth = entities.lastOrNull()?.let {
-                        MonthBucketing.yearMonthOf(it.assetDate)
-                    } ?: _progress.value.currentYearMonth,
+                    currentYearMonth = entities.lastOrNull()?.yearMonth
+                        ?: _progress.value.currentYearMonth,
                     isComplete = !page.hasMore
                 )
 
@@ -293,6 +337,18 @@ class MonthScanEngine(
                 scanStateDao.set(state)
             }
 
+            if (page.syncToken.isNotBlank()) {
+                syncStateDao.setSyncState(
+                    SyncStateEntity(
+                        key = PhotoRepository.KEY_PRIMARY_SYNC,
+                        syncToken = page.syncToken,
+                        continuationMarker = page.nextMarker.ifBlank { null },
+                        hasMore = page.hasMore,
+                        lastSyncTime = System.currentTimeMillis()
+                    )
+                )
+            }
+
             if (!page.hasMore || page.nextMarker.isBlank()) {
                 // Mark every month complete now that the walk is finished.
                 markAllMonthsComplete()
@@ -304,7 +360,9 @@ class MonthScanEngine(
                     currentYearMonth = _progress.value.currentYearMonth,
                     isComplete = true
                 )
-                return scanned
+                // The only place a walk is declared complete: CloudKit stopped handing out a
+                // continuationMarker. Everything the reconciler needs is now in `scan_seen_ids`.
+                return ScanRunResult(scanned, walkCompleted = true)
             }
 
             marker = page.nextMarker
@@ -395,6 +453,7 @@ class MonthScanEngine(
      */
     suspend fun ensureMonthIndexUpToDate() = withContext(Dispatchers.IO) {
         runCatching {
+            photoDao.deleteOrphanRows()
             backfillUnbucketedRows()
 
             // Order matters. `rebuildMonthIndex()` writes every row back with

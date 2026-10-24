@@ -10,6 +10,10 @@ import com.getup.iClouDroid.feature.photos.data.db.PhotoAssetEntity
 import com.getup.iClouDroid.feature.photos.data.db.PhotoDao
 import com.getup.iClouDroid.feature.photos.data.db.PhotoMonthIndexDao
 import com.getup.iClouDroid.feature.photos.data.db.PhotoMonthIndexEntity
+import com.getup.iClouDroid.feature.photos.data.db.PurgedIdDao
+import com.getup.iClouDroid.feature.photos.data.db.PurgedIdEntity
+import com.getup.iClouDroid.feature.photos.data.db.ScanSeenIdDao
+import com.getup.iClouDroid.feature.photos.data.db.ScanSeenIdEntity
 import com.getup.iClouDroid.feature.photos.data.db.ScanStateDao
 import com.getup.iClouDroid.feature.photos.data.db.ScanStateEntity
 import com.getup.iClouDroid.feature.photos.data.db.SyncStateDao
@@ -27,9 +31,11 @@ import com.getup.iClouDroid.feature.photos.data.db.SyncStateEntity
         PhotoAssetEntity::class,
         SyncStateEntity::class,
         PhotoMonthIndexEntity::class,
-        ScanStateEntity::class
+        ScanStateEntity::class,
+        ScanSeenIdEntity::class,
+        PurgedIdEntity::class
     ],
-    version = 4,
+    version = 7,
     exportSchema = false
 )
 abstract class PhotoDatabase : RoomDatabase() {
@@ -38,6 +44,8 @@ abstract class PhotoDatabase : RoomDatabase() {
     abstract fun syncStateDao(): SyncStateDao
     abstract fun photoMonthIndexDao(): PhotoMonthIndexDao
     abstract fun scanStateDao(): ScanStateDao
+    abstract fun scanSeenIdDao(): ScanSeenIdDao
+    abstract fun purgedIdDao(): PurgedIdDao
 
     companion object {
         /**
@@ -86,6 +94,82 @@ abstract class PhotoDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v4 → v5: cached EXIF/GPS for the info panel.
+         *
+         * Additive and DDL-only: the metadata is filled lazily per asset when the user opens the
+         * info card, so there is nothing to backfill here. `exifJson` stays NULL for every existing
+         * row ("never fetched"), which is exactly the correct state.
+         *
+         * `exifFetchedAt` needs an explicit `DEFAULT 0` because the column is NOT NULL and existing
+         * rows have no value to derive it from.
+         *
+         * NOTE: do not replace this with `fallbackToDestructiveMigration()`. Since v4 a schema bump
+         * must be a real migration — a destructive fallback would wipe the photo cache and force a
+         * full re-scan of the account (hundreds of CloudKit round trips) for what is one new column
+         * (AGENTS.md §12).
+         */
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE photo_assets ADD COLUMN exifJson TEXT")
+                db.execSQL(
+                    "ALTER TABLE photo_assets ADD COLUMN exifFetchedAt INTEGER NOT NULL DEFAULT 0"
+                )
+            }
+        }
+
+        /**
+         * v5 → v6: reconciliation scratch space (ISS-031).
+         *
+         * Purely additive. `scan_seen_ids` is derived data that the scan clears before each walk
+         * and repopulates as it goes, so an empty table is the correct starting state and there is
+         * nothing to backfill.
+         *
+         * Consequence worth stating: on the first walk after this upgrade, the pre-v6 cached rows
+         * are subject to reconciliation for the first time. Rows whose ids CloudKit still returns
+         * are untouched; ones deleted and expunged long ago are finally dropped.
+         */
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `scan_seen_ids` (
+                        `id` TEXT NOT NULL,
+                        `masterId` TEXT NOT NULL,
+                        `scannedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_scan_seen_ids_masterId` " +
+                        "ON `scan_seen_ids` (`masterId`)"
+                )
+            }
+        }
+
+        /**
+         * v6 → v7: persistent "CloudKit says this is gone" memory (ISS-031).
+         *
+         * Replaces an in-memory set that was lost on every cold start — precisely when a stale
+         * `syncToken` replay is most likely to re-deliver a purged record as a create.
+         * Starts empty; there is nothing to backfill.
+         */
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `purged_ids` (
+                        `id` TEXT NOT NULL,
+                        `purgedAt` INTEGER NOT NULL,
+                        `source` TEXT NOT NULL,
+                        PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         @Volatile
         private var INSTANCE: PhotoDatabase? = null
 
@@ -105,7 +189,7 @@ abstract class PhotoDatabase : RoomDatabase() {
                     PhotoDatabase::class.java,
                     "icloud_photos.db"
                 )
-                    .addMigrations(MIGRATION_3_4)
+                    .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
                     .build()
                 INSTANCE = instance
                 instance

@@ -41,6 +41,9 @@
 | [ISS-027](#iss-027-paging-3-remotemediator-导致深翻页跳顶改用月分组本地分页根治) | Paging 3 `RemoteMediator` 导致深翻页跳顶，改用月分组本地分页根治 | 🔴 P0 | Android / UI + Paging | ✅ 已修复 |
 | [ISS-028](#iss-028-go-层缺结构化错误字段导致-kotlin-靠正则猜) | Go 层缺结构化错误字段，导致 Kotlin 靠正则猜 | 🟡 P2 | Go / Android 跨语言 | ✅ 已修复 |
 | [ISS-029](#iss-029-initsession-未将握手结果回写至-session导致进程内调用拼出空-host) | `InitSession` 未将握手结果回写至 `Session`，导致进程内调用拼出空 host | 🟠 P1 | Go 核心层 | ✅ 已修复 |
+| [ISS-030](#iss-030-已删除照片永不消失且最近删除照片被当成正常照片入库) | 已删除照片永不消失，且「最近删除」照片被当成正常照片入库 | 🔴 P0 | Go / Android 跨语言 | ✅ 已修复 |
+| [ISS-031](#iss-031-全库扫描只增不减已永久删除的照片永远残留) | 全库扫描只增不减，已永久删除的照片永远残留 | 🔴 P0 | Android / Repository + Scan | ✅ 已修复 |
+| [ISS-032](#iss-032-设置页侧边返回手势直接退出应用) | 设置页侧边返回手势直接退出应用，且无预测返回效果 | 🟠 P1 | Android / UI | ✅ 已修复 |
 
 ---
 
@@ -2435,6 +2438,360 @@ session.mu.Unlock()
 > [!IMPORTANT]
 > **“返回值”不等于“对象状态”。** 任何一次性结构体返回值都必须同步到长期存活的对象上，
 > 否则调用方一旦改变（从读返回值改为读对象），就会在很远的地方以“空字符串”的形式爆。
+
+---
+
+## ISS-030：已删除照片永不消失，且「最近删除」照片被当成正常照片入库
+
+**优先级**：🔴 P0（数据正确性；用户可见的“删了还在”与“不该看到的照片”）
+**归属**：`../go-core/photos.go` + `PhotoRepository` / `MonthScanEngine` / `PhotoDao`
+**发现时间**：Phase 2 收尾真机联调
+
+### 现象
+
+两个互补的症状，本质是同一个缺口：
+
+1. **删不掉**：在其他 Apple 设备（或 iCloud Web）上删除并清空「最近删除」的照片，
+   在本 App 里**永远存在**，图片仍能正常加载。用户描述为「首页那几个大头照和身份证图片」。
+2. **不该出现**：仍处于「最近删除」30 天保留期的照片，被当成正常照片展示在画廊里。
+
+### 日志证据
+
+本地库与云端已经不一致，且**多次冷启动、多次手动增量同步都无法收敛**：
+
+```
+# 本地库里还躺着云端早已不存在的记录
+SELECT id, filename FROM photo_assets ORDER BY assetDate DESC LIMIT 3;
+C0D822C7-0FAA-422E-9ED5-7018DEA47AB3|C0D822C7-0FAA-422E-9ED5-7018DEA47AB3   ← master 当照片存进来了
+
+# 增量同步“成功”，但变更数为 0
+PhotoRepository: Starting incremental sync with token: HwoECMjsCRgAIhY...
+PhotosViewModel: Sync finished, count=0
+```
+
+`/records/changes` 对这个 syncToken 返回**空变更集**——因为被软删除的 `CPLAsset` 记录
+**仍然存在**于 CloudKit（只是 `isDeleted = 1`），tombstone 只有 30 天保留期满、真正 expunge 后才会产生。
+
+### 根因（四条叠加）
+
+#### 1. `isDeleted` 从未出现在 `desiredKeys` 里
+
+```go
+// ❌ 修复前：defaultDesiredKeys 里没有 "isDeleted"
+var defaultDesiredKeys = []string{
+    "recordName", "recordType", "recordChangeTag", "masterRef",
+    "assetDate", "addedDate", "isFavorite", "isHidden", // ← isHidden 有，isDeleted 没有
+    ...
+}
+```
+
+CloudKit 只会返回 `desiredKeys` 里列出的字段。于是 `parseRecords` 里那句
+`rec.Fields["isDeleted"].AsInt64() == 1` 的判定**恒为 false**——不是逻辑写错，是字段根本没传回来。
+
+#### 2. 孤儿 `CPLMaster` 被无条件伪造成照片
+
+`CPLAssetAndMasterByAssetDateWithoutHiddenOrDeleted` 这个视图只在**服务端**过滤 `CPLAsset`，
+但与之配对的 `CPLMaster`（含 `downloadURL`）在回收站 30 天保留期内**照常返回**。
+旧代码把没有 Asset 的 Master 补成 `assetDate = 0` 的照片：
+
+```go
+// ❌ 修复前：任何未配对的 master 都被捏造成一张照片
+for mID, m := range masters {
+    if !matchedMasters[mID] {
+        photos = append(photos, PhotoItem{ID: mID, MasterID: mID, AssetDate: 0, ...})
+    }
+}
+```
+
+这既解释了「大头照」的来源，也解释了上面库里那行 `id == masterId` 的记录。
+
+#### 3. 「最近删除」查询的 recordType 用错了三次
+
+按 `pyicloud` 的 `PHOTO_ALBUMS` 表去拉回收站列表，连续三次被服务端打回：
+
+| 尝试 | 服务端返回 |
+| --- | --- |
+| `recordType: CPLAssetDeletedByExpungedDate` | `404 Did not find record type` |
+| `...InSmartAlbumByAssetDate` + `filterBy: smartAlbumType` | `400 Expected a parameter with name: smartAlbum` |
+| 同上 + `smartAlbum` 放 `query` 内 / 顶层 | 同样的 `400` |
+| **`recordType: CPLAssetAndMasterDeletedByExpungedDate`** | ✅ `success: true` |
+
+关键在于 `obj_type` 与 `list_type` 是**两个不同的标识符**：前者只用于
+`HyperionIndexCountLookup` 的计数查询，后者才是真正的 recordType。
+
+#### 4. 增量同步基线几乎不存在
+
+- `MonthScanEngine` 跑完全库遍历后**从不写入** `sync_state.syncToken`；
+- `syncIncremental` 只拉一页，`moreComing = true` 时直接丢弃后续变更；
+- `syncPhotos` 的启动路径在全库扫完后**直接 return**，从不触发增量同步。
+
+于是「服务端有变更」这件事根本没有机制被发现。
+
+### 修复
+
+**Go 核心层** `../go-core/photos.go`
+
+- `defaultDesiredKeys` 增加 `"isDeleted"`；`PhotoItem` 增加 `IsDeleted bool`
+- 删除「孤儿 master 伪造照片」的整段逻辑（回收站照片的 master 不允许进入画廊）
+- `deletedIDs` 同时收集 `recordName` 与 `masterRef`（tombstone 可能只带其中一个）
+- 新增 `FetchRecentlyDeleted()`，走 `CPLAssetAndMasterDeletedByExpungedDate` 分页拉全量回收站 ID
+
+**Android 数据层**
+
+| 位置 | 改动 |
+| --- | --- |
+| `parsePhotoItems` | 识别 `isDeleted`，把对应 `id`/`masterId` 收集进 `trashedIds`，不再产出实体 |
+| `PhotoRepository.purgeTrashed()` | 统一清理：删行 → 重建受影响月份索引 → 淘汰 Coil 缓存 → 记入 `recentlyPurgedIds` |
+| `syncIncremental` | 多页拉取（`moreComing` 循环，上限 10 轮）；tombstone 与 trashed 合并处理；`recentlyPurgedIds` 拦截「旧 syncToken 重放」导致的复活 |
+| `purgeRecentlyDeleted()` | 启动/刷新时定向清理回收站 |
+| `PhotoDao.deleteByIds` | 改为 `WHERE id IN (...) OR masterId IN (...)`，兼容两种维度 |
+| `PhotoDao.deleteOrphanRows` | 清掉历史遗留的 `assetDate <= 0 OR id = masterId` 脏行 |
+| `MonthScanEngine` | 扫描前清孤儿行；**每页持久化 `syncToken`**；完成后 `scan_state` 与 `sync_state` 双向对齐 |
+| `PhotosViewModel` | 全库扫描完成后串联 `purgeRecentlyDeleted()` + `syncIncremental()` |
+
+### 验证
+
+真机（SM-F9760）实测：
+
+```
+fetchRecentlyDeleted raw: {"success":true,"deletedIds":[...4 个真实 ID...]}
+purgeRecentlyDeleted - cloud reported 4 recently-deleted ids
+```
+
+| 指标 | 修复前 | 修复后 |
+| --- | --- | --- |
+| 标题总数 | 15960 | 15957 |
+| 2026年10月 分组 | 78 项 | 75 项 |
+| 用户指认的残留照片 | 在网格中可见 | 已消失 |
+| 冷启动 ×2 + 手动增量同步后 | 依旧残留 | `resurrected=0`，不再复活 |
+
+`go test ./...` 新增三个用例均通过：
+
+- `TestOrphanMastersNotAdded` —— 只有 `CPLMaster` 时**不产生**照片
+- `TestFetchRecentlyDeleted` —— 回收站查询同时返回 asset 与 master 两个维度
+- `TestFetchChanges` —— `isDeleted = 1` 的 `CPLAsset` 被识别为删除
+
+### 经验教训
+
+> [!CAUTION]
+> **`desiredKeys` 是白名单，不是过滤器。** 少写一个字段，服务端的判断分支就永远走不到，
+> 而且没有任何报错——表现为「代码逻辑看着没错，就是不生效」。新增任何“依据某字段过滤”的行为，
+> 必须先确认该字段在 `desiredKeys` 里。
+
+> [!IMPORTANT]
+> **CloudKit 的「删除」是两段式的，tombstone 只在第二段出现。**
+> 移入「最近删除」时 `CPLAsset` 记录**还在**，只把 `isDeleted` 置 1，`/records/changes`
+> **不会**给出任何变更。指望增量同步发现软删除是错的，必须显式拉回收站索引。
+
+> [!WARNING]
+> **`xxxByExpungedDate` 这类标识符要分清 `obj_type` 与 `list_type`。**
+> 前者给 `HyperionIndexCountLookup` 计数，后者才是 `records/query` 的 `recordType`。
+> 探测的可靠依据是服务端错误文案（`404 Did not find record type` vs
+> `400 Expected a parameter`），而不是猜参数位置。
+
+---
+
+## ISS-031：全库扫描只增不减，已永久删除的照片永远残留
+
+**优先级**：🔴 P0（数据正确性；用户可复现的“删了还在”）
+**归属**：`MonthScanEngine` + `PhotoRepository` + `PhotoDao` + Room v5/v6/v7
+**发现时间**：Phase 2 收尾，ISS-030 修复后的真机复查
+**状态**：✅ 已修复
+
+### 现象
+
+ISS-030 修完后，用户在 iCloud 上删除并**清空回收站**的照片仍在 App 里，且**多次冷启动、多次增量同步都无法收敢**。
+
+与 ISS-030 的区别：那条修的是“不该入库的入库了”（`isDeleted` / 孤儿 master），
+这条是“入库后永远不删”——即使一条都没误入库，删除仍然不会发生。
+
+### 日志证据
+
+```
+# 本地库里还躺着云端已彻底不存在的行
+photo_assets 总行数               15957
+scan_state.scannedCount        15936   ← 比实际少 21
+
+# 语义上是“全量扫描”，实际只做 upsert：
+MonthScanEngine: scan complete - 15937 assets across 108 months
+# 但库里 → 15958 行，多出来的那些没有任何路径会删
+```
+
+数据库取证还发现 155 行属于「同一 `masterId` 多条 `CPLAsset`」，例如：
+
+```sql
+SELECT id, filename, assetDate FROM photo_assets WHERE masterId='ASiWjzUxvNN81ZXosCMKLSKZYkFK';
+54FBED04-…|IMG_1882.JPG|2024-10-06 22:54:15
+79072B11-…|IMG_1882.JPG|2024-08-21 18:05:07
+9F987577-…|IMG_1882.JPG|2024-08-09 16:11:28
+```
+
+### 根因
+
+**扫描是“只增不减”的。** 它把云端返回的一切 upsert 进去，但从不对“这次没返回的”做任何处理。
+而两条删除消息源都盖不住“已永久删除且已离开回收站”的记录：
+
+| 路径 | 能覆盖 | 盖不住 |
+| --- | --- | --- |
+| `/records/changes` tombstone | 真正 expunge 的记录 | 软删除（`isDeleted=1`）**无任何消息** |
+| 回收站索引 | 仍在“最近删除”内的资产 | **已永久删除**的不在这个索引里 |
+
+于是：**一条记录被永久删除后，如果既没产生 tombstone、又已离开回收站索引，
+本地就永远没有机会得知它消失了。**
+
+### 修复
+
+把全库扫描从“累加”升级为真正的 **reconciliation（对账）**：
+
+1. **`scan_seen_ids` 暂存表（Room v6）** —— 扫描每页把 `id` 与 `masterId` 写进去，代表“云端仍持有”。
+2. **`walkCompleted` 显式信号** —— `runScanLoop` 返回 `ScanRunResult(scanned, walkCompleted)`，
+   `walkCompleted = true` 全代码只有一个赋值点：云端不再给 `continuationMarker` 的那一页。
+   任何提前退出（wipe/401/网络放弃/协程取消）都是 `false`。
+3. **`Reconcile.decide()` 纯函数** —— 保守规则：
+   - `id ∉ seen` 且 `masterId ∉ seen` → 删除
+   - `masterId ∈ seen` → **全部保留**（同一媒体还有别的存活资产）
+4. **`recentlyPurgedIds` 持久化（Room v7 `purged_ids`）** —— 原本是内存 Set，冷启动即清空，
+   而陈旧 `syncToken` 的重放恰好发生在冷启动；改为持久化后，删掉的照片不会被“复活”。
+5. **`dataMutationMutex`** —— 对账 / 增量同步 / 回收站清理共用一把锁，防止 read-then-delete 交错。
+6. **多 CPLAsset 串写修复** —— `updateUrls` 从 `WHERE masterId =` 改为 `WHERE id =`，
+   `getPhotoByMasterId`（`LIMIT 1`）改为 `getPhotosByMasterId`（全组）。
+
+### 验证
+
+真机（SM-F9760）实测：
+
+```
+scan complete - 15937 assets across 108 months
+reconcile: seen=31795 local=15937 purged=22 keptByMaster=0 keptBySeen=15937
+```
+
+| 指标 | 修复前 | 修复后 |
+| --- | --- | --- |
+| `photo_assets` 行数 | 15958 | 15937 |
+| `month_index` 求和 | 15958 | 15937（一致） |
+| `scan_state.scannedCount` | 15936（偏差 21） | 15937（一致） |
+| 冷启动重扫后复活数 | — | **0** |
+
+`go test ./...` 新增 `TestFetchPhotoPageReportsDeletedIds`；
+`testDebugUnitTest` 137 项（含 11 项 `ReconcileTest`）全绿。
+
+### ⚠️ 实施中自己踩的坑（已修复，很有价值）
+
+首次真机验证时，**中途杀进程触发“断点续扫”**，而对账把 700 张真实照片误删了。
+
+原因有两层：
+
+1. `scanAll` 在每次启动都调 `resetSeenIds()`，而**续扫只覆盖剩余页**，
+   于是 `seen` 只剩库的后半段。
+2. 安全闸门原本是“`seen` ≥ 本地 50%”，而“只剩后半段”恰好高于 50%，**闸门没拦住**。
+
+修复：
+
+- `scan_seen_ids` **仅在 `lastMarker == null`（全新一轮）时清空**；续扫保留前次已记录的 id。
+- 闸门改为严格版：**`seenIdCount ≥ localCount`**。
+  推导：一个真正完整的 walk，每一行本地记录都至少贡献一个 id 到 `seen`，
+  所以完整 walk 必然满足该不等式；任何不满足都是“id 集不完整”的铁证，与原因无关。
+
+验证：续扫日志出现 `resuming walk - keeping earlier page ids`，对账结果 `purged=0`，库完好。
+
+> [!CAUTION]
+> **这是“误删可恢复”设计的实战验证。** 700 行被删后，清 `scan_state` 重新全量扫一遍就全部回灌了（15937 恢复），
+> 因为对账只删本地缓存，云端数据从未被动过。这也说明：不要为了“避免误删”而放弃对账，
+> 正确做法是把闸门做严、把误删做成可回灌。
+
+### 经验教训
+
+> [!IMPORTANT]
+> **“全量扫描”不等于“能证明缺失”。** 只 upsert 的扫描只能回答“云端有什么”，
+> 回答不了“云端没有什么”。后者必须靠“本次遍历到的全量 ID 集合”做差集。
+
+> [!WARNING]
+> **带游标的增量式任务，其“本轮完成”的判据不能是“函数正常返回”。**
+> 必须把“是否走完”作为显式返回值传递，否则断点续扫会把自己的前半段当成“不存在”。
+> 同理，任何“清理”动作都必须先回答：本次观察到的集合，是全集还是子集？
+
+> [!TIP]
+> **“误删可恢复”要作为设计约束写进代码。** 本例中它把一次数据事故降级为一次浪费时间的重扫。
+> 实施时我们坚持了一个判断：**误删一张的代价 ≫ 漏删一张的代价**，所以选了全量对账（而非只靠 tombstone），
+> 但用三重闸门把误删风险压到接近零。
+
+---
+
+## ISS-032：设置页侧边返回手势直接退出应用
+
+**优先级**：🟠 P1（用户可复现，且现象“像是崩溃”）
+**归属**：`ui/AppShell.kt` + 新增 `ui/settings/SettingsContainer.kt`
+**发现时间**：设置页上线后的首轮真机试用
+**状态**：✅ 已修复
+
+### 现象
+
+在设置页使用**侧边返回手势**，会直接回到**桌面**（应用被关闭）；
+而左上角返回箭头却正常回到照片页。
+
+### 根因
+
+本项目没有导航图（Navigation Compose），设置页是一个 **overlay**：
+`AppShell` 里一个布尔状态 `settingsOpen` + 条件渲染。
+
+问题在于：**Compose 和 `Activity` 都不知道“上面又压了一层”。** 界面换了，
+但没人向系统注册返回处理，于是返回事件按标准流程落到 `MainActivity` → 系统退出应用。
+
+左上角箭头之所以对，是因为它直接调 `onBack = { settingsOpen = false }`，绕过了系统分发。
+
+### 第一轮修复（不完整）
+
+加了 `BackHandler { settingsOpen = false }`。退出应用的问题解决了，
+但**没有预测返回效果**：拖动全程面板纹丝不动，系统却在画它自己的预览快照，松手才瞬移消失。
+观感割裂，且与查看器（`PhotoViewerScreen`）的已实现行为不一致。
+
+### 最终修复
+
+新增 `ui/settings/SettingsContainer.kt`，把设置页包一层，**同时接两路**：
+
+```kotlin
+PredictiveBackHandler(enabled = true) { progressFlow ->
+    try {
+        progressFlow.collect { e -> gestureProgress = e.progress }  // 跟随手指
+        closeWithAnimation()                                        // 松手完成
+    } catch (e: CancellationException) {
+        exitProgress.animateTo(0f, tween(RESTORE_DURATION_MS))      // 放弃 → 回弹
+        throw e
+    }
+}
+
+BackHandler(enabled = true) { closeWithAnimation() }   // 兵底 + 普通返回键
+```
+
+两个 `enabled = true` 不冲突：同一次手势只会被其中一个消费。预测返回可用时前者先拿到；
+不可用时流程不触发，后者接管。不需要额外探测系统能力。
+
+**动画只动 `graphicsLayer`**（`translationX` + `alpha`），不用 `Modifier.offset` ——
+后者改变布局尺寸，等于每帧重新测量整个设置列表。
+
+`gestureProgress` 与 `exitProgress` 分开存：`Animatable.snapTo` 是 suspend，
+不能在非挂起的指针回调里调（与 `ViewerTransitionState` 同一套做法）。
+
+### 验证（SM-F9760）
+
+| 路径 | 结果 |
+| --- | --- |
+| 侧边手势拖满松手 | ✅ 面板跟随手指平移淡出 → 回到照片页 |
+| 侧边手势拖到一半取消 | ✅ 回弹，设置页保持打开 |
+| 左上角返回箭头 | ✅ 回到照片页 |
+| 硬件 / 普通返回键 | ✅ 回到照片页 |
+| `topResumedActivity` | 始终 `com.getup.iClouDroid/.MainActivity`，从未退出应用 |
+
+### 经验教训
+
+> [!IMPORTANT]
+> **Compose 里的“新页面”不会自动获得返回语义。** 只要它是 overlay（而非
+> Activity / 导航图目的地），就必须自己接住返回。三条路径（侧边手势 / 自画箭头 / 返回键）
+> **必须行为一致**，新增任何 overlay 页面时先把这三条接上再接其他。
+
+> [!TIP]
+> 已有正确实现时（本例的查看器），**必须对齐而不是另写一套**。
+> 第一轮修复只做了“不退出应用”这个最低限度，用户立刻就能看出两者观感不一样。
 
 ---
 

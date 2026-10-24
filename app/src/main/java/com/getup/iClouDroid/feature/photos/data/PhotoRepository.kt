@@ -6,7 +6,11 @@ import com.getup.iClouDroid.BuildConfig
 import com.getup.iClouDroid.data.session.SessionManager
 import com.getup.iClouDroid.feature.photos.data.db.PhotoAssetEntity
 import com.getup.iClouDroid.feature.photos.data.db.PhotoMonthIndexEntity
+import com.getup.iClouDroid.feature.photos.data.db.PurgedIdDao
+import com.getup.iClouDroid.feature.photos.data.db.PurgedIdEntity
+import com.getup.iClouDroid.feature.photos.data.db.ScanSeenIdEntity
 import com.getup.iClouDroid.feature.photos.data.db.SyncStateEntity
+import com.getup.iClouDroid.feature.photos.data.image.ICloudImageLoaderFactory
 import com.getup.icloudcore.Icloudcore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -20,6 +24,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.Collections
 
 data class RefreshedUrls(
     val thumbUrl: String?,
@@ -60,15 +65,22 @@ internal data class CoreError(
 )
 
 /**
- * One raw page of the photo library, as consumed by [MonthScanEngine] (P2-016).
+ * One raw page of the photo library, as consumed by `MonthScanEngine` (P2-016).
  *
  * [hasMore] is already collapsed to `false` when the cursor is blank, so callers never have to
  * guard against "hasMore but no way to continue".
+ *
+ * [trashedIds] carries assets CloudKit returned in this page while flagged `isDeleted` (still
+ * inside the 30-day "Recently Deleted" window). They are deliberately absent from [entities]:
+ * caching one would show a deleted photo, and *silently* dropping one would make a page that
+ * contained it indistinguishable from a page that never did (ISS-031).
  */
 internal data class ScanPage(
-    val photos: List<PhotoAssetEntity>,
+    val entities: List<PhotoAssetEntity>,
     val nextMarker: String,
-    val hasMore: Boolean
+    val hasMore: Boolean,
+    val syncToken: String = "",
+    val trashedIds: Set<String> = emptySet()
 )
 
 /**
@@ -197,6 +209,8 @@ class PhotoRepository(
     private val syncStateDao = database.syncStateDao()
     private val photoMonthIndexDao = database.photoMonthIndexDao()
     private val scanStateDao = database.scanStateDao()
+    internal val scanSeenIdDao = database.scanSeenIdDao()
+    private val purgedIdDao = database.purgedIdDao()
     private val sessionMutex = Mutex()
 
     // ----------------------------------------------------------------------------------------
@@ -214,9 +228,67 @@ class PhotoRepository(
     /** masterId -> in-flight refresh, so N concurrent failures share a single /records/lookup. */
     private val inFlightRefreshes = mutableMapOf<String, Deferred<Result<RefreshedUrls>>>()
 
+    // EXIF lookups get their own mutex/map rather than sharing the URL-refresh ones: the two are
+    // unrelated requests and must be able to proceed independently.
+    private val metadataMutex = Mutex()
+
+    /** masterId -> in-flight metadata lookup, so tapping "info" twice sends one request. */
+    private val inFlightMetadata = mutableMapOf<String, Deferred<Result<String>>>()
+
     /** Timestamp of the last session rebuild (used to join the "everything just expired" storm). */
     @Volatile
     private var sessionUrlRefreshedAt: Long = 0L
+
+    /**
+     * Serialises every operation that mutates [photo_assets] outside of a single upsert.
+     *
+     * Today that is the full reconciliation walk, the incremental sync and the "Recently Deleted"
+     * sweep. They all read-then-delete, so letting two of them interleave would let one delete rows
+     * the other just proved alive. The same lock is what a future user-initiated delete must take
+     * (see the delete note below), which is why it lives here rather than inside the scan engine.
+     */
+    private val dataMutationMutex = Mutex()
+
+    /**
+     * Assets CloudKit has confirmed are gone, remembered across restarts.
+     *
+     * `/records/changes` does **not** report a soft-deleted (trashed) asset as a tombstone: the
+     * record still exists, it is merely flagged `isDeleted`. So a photo deleted on another device
+     * can be re-delivered as an ordinary *create* whenever the change feed is replayed from a
+     * `syncToken` older than the deletion. Vetoing such upserts is what stops a purged photo from
+     * reappearing.
+     *
+     * Persisted (not an in-memory set) because the replay usually happens on a cold start, which is
+     * exactly when process memory has been thrown away. See [PurgedIdEntity] for the expiry rule
+     * that keeps a genuine "restore from Recently Deleted" from being vetoed forever.
+     */
+    @Volatile
+    private var purgedCache: Set<String> = emptySet()
+
+    private suspend fun refreshPurgedCache() {
+        val notBefore = System.currentTimeMillis() - PurgedIdDao.RETENTION_MS
+        purgedCache = runCatching { purgedIdDao.getActiveIds(notBefore).toSet() }
+            .getOrDefault(emptySet())
+    }
+
+    /** True when CloudKit has recently confirmed this id is no longer part of the gallery. */
+    internal fun isPurged(id: String): Boolean = id in purgedCache
+
+    suspend fun rememberPurged(ids: Collection<String>, source: String = "purge") {
+        if (ids.isEmpty()) return
+        val now = System.currentTimeMillis()
+        val rows = ids.distinct().map { PurgedIdEntity(id = it, purgedAt = now, source = source) }
+        runCatching {
+            purgedIdDao.upsertAll(rows)
+            purgedIdDao.deleteOlderThan(now - PurgedIdDao.RETENTION_MS)
+            val total = purgedIdDao.count()
+            val overflow = total - PurgedIdDao.MAX_ROWS
+            if (overflow > 0) {
+                purgedIdDao.deleteOldest(overflow)
+            }
+            refreshPurgedCache()
+        }.onFailure { Log.w(TAG, "rememberPurged failed: ${it.message}") }
+    }
 
     val totalCountFlow: Flow<Int> = photoDao.getCount()
 
@@ -514,7 +586,22 @@ class PhotoRepository(
             val json = JSONObject(jsonStr)
             val success = json.optBoolean("success", false)
             val ready = json.optBoolean("ready", false)
+            val syncToken = json.optString("syncToken", "")
             if (success && ready) {
+                if (syncToken.isNotBlank()) {
+                    val existing = syncStateDao.getSyncState(KEY_PRIMARY_SYNC)
+                    if (existing == null || existing.syncToken.isNullOrBlank()) {
+                        syncStateDao.setSyncState(
+                            SyncStateEntity(
+                                key = KEY_PRIMARY_SYNC,
+                                syncToken = syncToken,
+                                continuationMarker = null,
+                                hasMore = true,
+                                lastSyncTime = System.currentTimeMillis()
+                            )
+                        )
+                    }
+                }
                 Result.success(true)
             } else {
                 val err = json.optString("errorMessage", "PrimarySync 分区尚未就绪")
@@ -552,7 +639,9 @@ class PhotoRepository(
                 return@withContext Result.failure(Exception(err))
             }
 
-            val photos = parsePhotoItems(json.optJSONArray("photos"))
+            val initialTrashed = mutableSetOf<String>()
+            val photos = parsePhotoItems(json.optJSONArray("photos"), initialTrashed)
+            if (initialTrashed.isNotEmpty()) purgeTrashed(initialTrashed)
             val marker = json.optString("continuationMarker", "")
             val hasMore = json.optBoolean("hasMore", false)
             val syncToken = json.optString("syncToken", "")
@@ -620,7 +709,9 @@ class PhotoRepository(
                 return@withContext Result.failure(Exception(err))
             }
 
-            val photos = parsePhotoItems(json.optJSONArray("photos"))
+            val nextTrashed = mutableSetOf<String>()
+            val photos = parsePhotoItems(json.optJSONArray("photos"), nextTrashed)
+            if (nextTrashed.isNotEmpty()) purgeTrashed(nextTrashed)
             val nextMarker = json.optString("continuationMarker", "")
             val hasMore = json.optBoolean("hasMore", false)
             val syncToken = json.optString("syncToken", state.syncToken ?: "")
@@ -682,15 +773,21 @@ class PhotoRepository(
             }
 
             val json = JSONObject(jsonStr)
-            val photos = parsePhotoItems(json.optJSONArray("photos"))
+            val trashedIds = mutableSetOf<String>()
+            val photos = parsePhotoItems(json.optJSONArray("photos"), trashedIds)
             val nextMarker = json.optString("continuationMarker", "")
             val hasMore = json.optBoolean("hasMore", false)
+            val syncToken = json.optString("syncToken", "")
 
+            // Purging happens in `recordScanPage`, under the mutation lock — doing it here would
+            // delete rows from a background thread racing the walk.
             Result.success(
                 ScanPage(
-                    photos = photos,
+                    entities = photos,
                     nextMarker = nextMarker,
-                    hasMore = hasMore && nextMarker.isNotBlank()
+                    hasMore = hasMore && nextMarker.isNotBlank(),
+                    syncToken = syncToken,
+                    trashedIds = trashedIds
                 )
             )
         } catch (e: Exception) {
@@ -699,72 +796,323 @@ class PhotoRepository(
         }
     }
 
-    suspend fun syncIncremental(limit: Int = 100): Result<Int> = withContext(Dispatchers.IO) {
-        wipeBlocked()?.let { return@withContext Result.failure(it.exceptionOrNull()!!) }
+    /**
+     * Drops the local copies of assets CloudKit reported as trashed (`isDeleted = 1`).
+     *
+     * Shared by the scan and the incremental sync. Everything it removes is also remembered in
+     * [recentlyPurgedIds], so a replay of an old `syncToken` cannot put the row back.
+     *
+     * @return how many identities were purged (0 when nothing was local to begin with).
+     */
+    private suspend fun purgeTrashed(ids: Set<String>): Int {
+        if (ids.isEmpty()) return 0
+        rememberPurged(ids, source = "trashed")
+        val affectedMonths = photoDao.getYearMonthsForIds(ids.toList())
+        if (affectedMonths.isEmpty()) return 0
+        Log.d(TAG, "Purging ${ids.size} trashed assets (months=$affectedMonths)")
+        photoDao.deleteByIds(ids.toList())
+        rebuildMonthIndexFor(affectedMonths)
+        ICloudImageLoaderFactory.evictAssets(ids)
+        return ids.size
+    }
+
+    /**
+     * Applies an in-progress walk's page to the local cache (ISS-031).
+     *
+     * Two things happen here that plain [fetchScanPage] does not do:
+     *
+     *  1. Every live asset is recorded in `scan_seen_ids`, so the walk can later prove what still
+     *     exists in the account.
+     *  2. Assets CloudKit flagged `isDeleted` are purged immediately instead of being cached.
+     *
+     * Caller must already hold [dataMutationMutex] (the scan engine does).
+     */
+    internal suspend fun recordScanPage(page: ScanPage): Int {
+        val now = System.currentTimeMillis()
+        if (page.entities.isNotEmpty()) {
+            photoDao.upsertAll(page.entities)
+            scanSeenIdDao.upsertAll(
+                page.entities.map { ScanSeenIdEntity(it.id, it.masterId, now) }
+            )
+            rebuildMonthIndexFor(page.entities.map { it.yearMonth }.distinct())
+        }
+        if (page.trashedIds.isNotEmpty()) {
+            purgeTrashed(page.trashedIds)
+        }
+        return page.entities.size
+    }
+
+    /** Clears the walk's scratch table. Called before a new walk starts. */
+    internal suspend fun resetSeenIds() {
+        runCatching { scanSeenIdDao.clearAll() }
+            .onFailure { Log.w(TAG, "resetSeenIds failed: ${it.message}") }
+    }
+
+    /**
+     * Diff the cached library against everything the cloud still returned, and delete the extras.
+     *
+     * This is the only code path that can remove a photo the cloud deleted *and* expunged long
+     * ago, because it is the only one that can positively prove absence.
+     *
+     * ### Safety gates (all must pass)
+     *
+     * 1. The caller guarantees the walk was declared finished by CloudKit. A partial walk would
+     *    make almost every row look deleted.
+     * 2. [Reconcile.isSafeToApply] — refuses a run whose seen-id count is implausibly small, which
+     *    is what a server answering `200` with an empty page looks like.
+     * 3. Conservative master rule — implemented in [Reconcile.decide].
+     *
+     * Deletion is limited to `photo_assets` (a cache). Files already written into the user's
+     * gallery by `MediaStoreDownloader` are never touched.
+     *
+     * @return number of rows removed, or a failure describing which gate refused the run.
+     */
+    internal suspend fun reconcileWithSeenIds(): Result<Int> = dataMutationMutex.withLock {
+        withContext(Dispatchers.IO) {
+            if (isWiping) {
+                return@withContext Result.failure(Exception("正在退出登录，已暂停照片同步"))
+            }
+
+            val local = photoDao.getAllIdentities()
+            if (local.isEmpty()) {
+                scanSeenIdDao.clearAll()
+                return@withContext Result.success(0)
+            }
+
+            val seenIds = scanSeenIdDao.getSeenIds().toSet()
+            if (!Reconcile.isSafeToApply(localCount = local.size, seenIdCount = seenIds.size)) {
+                Log.w(
+                    TAG,
+                    "reconcile aborted: seen too small (seen=${seenIds.size}, local=${local.size}) - " +
+                        "refusing to delete on an implausible walk"
+                )
+                scanSeenIdDao.clearAll()
+                return@withContext Result.failure(
+                    Exception("对账中止：本轮仅看到 ${seenIds.size} 项，远少于本地 ${local.size} 项")
+                )
+            }
+
+            val decision = Reconcile.decide(local, seenIds)
+            Log.i(
+                TAG,
+                "reconcile: seen=${seenIds.size} local=${local.size} purged=${decision.toDelete.size} " +
+                    "keptByMaster=${decision.keptByMaster} keptBySeen=${decision.keptBySeen}"
+            )
+
+            if (decision.toDelete.isEmpty()) {
+                scanSeenIdDao.clearAll()
+                return@withContext Result.success(0)
+            }
+
+            // Auditable before it happens: this run is the only place a live row can disappear.
+            Log.w(
+                TAG,
+                "reconcile will purge ${decision.toDelete.size} cached rows that CloudKit no " +
+                    "longer returns: ${decision.toDelete.take(PURGE_LOG_SAMPLE)}"
+            )
+
+            val affectedMonths = photoDao.getYearMonthsForIds(decision.toDelete)
+            val removed = photoDao.deleteByAssetIds(decision.toDelete)
+            if (affectedMonths.isNotEmpty()) {
+                rebuildMonthIndexFor(affectedMonths)
+            }
+            ICloudImageLoaderFactory.evictAssets(decision.toDelete)
+            rememberPurged(decision.toDelete, source = "reconcile")
+            scanSeenIdDao.clearAll()
+
+            Result.success(removed)
+        }
+    }
+
+    /**
+     * Pulls incremental changes on top of the already-scanned library.
+     *
+     * Serialised against the other mutation paths: it appends rows while the reconcile walk and the
+     * expunge sweep delete them, and those two read-then-act.
+     */
+    suspend fun syncIncremental(limit: Int = 100): Result<Int> = dataMutationMutex.withLock {
+        withContext(Dispatchers.IO) { syncIncrementalLocked(limit) }
+    }
+
+    private suspend fun syncIncrementalLocked(limit: Int): Result<Int> {
+        wipeBlocked()?.let { return Result.failure(it.exceptionOrNull()!!) }
         var sessionCheck = ensureGoSession()
         if (sessionCheck.isFailure) {
-            return@withContext Result.failure(sessionCheck.exceptionOrNull() ?: Exception("会话建立失败"))
+            return Result.failure(sessionCheck.exceptionOrNull() ?: Exception("会话建立失败"))
         }
 
         try {
             val state = syncStateDao.getSyncState(KEY_PRIMARY_SYNC)
-            val syncToken = state?.syncToken ?: ""
-            if (syncToken.isBlank()) {
+            var currentSyncToken = state?.syncToken ?: ""
+            if (currentSyncToken.isBlank()) {
                 Log.d(TAG, "No syncToken found, falling back to fetchInitialPage")
-                return@withContext fetchInitialPage(limit)
+                return fetchInitialPage(limit)
             }
 
-            Log.d(TAG, "Starting incremental sync with token: ${syncToken.take(15)}...")
-            var jsonStr = Icloudcore.fetchChanges(syncToken, limit.toLong())
+            Log.d(TAG, "Starting incremental sync with token: ${currentSyncToken.take(15)}...")
+            var totalChanged = 0
+            var pageCount = 0
+            val maxPages = 10
+
+            while (pageCount < maxPages) {
+                pageCount++
+                var jsonStr = Icloudcore.fetchChanges(currentSyncToken, limit.toLong())
+                if (isAuthError(jsonStr)) {
+                    Log.w(TAG, "syncIncremental returned auth error, forcing session refresh...")
+                    sessionCheck = ensureGoSession(force = true)
+                    if (sessionCheck.isFailure) {
+                        return Result.failure(sessionCheck.exceptionOrNull() ?: Exception("会话重建失败"))
+                    }
+                    jsonStr = Icloudcore.fetchChanges(currentSyncToken, limit.toLong())
+                }
+
+                val json = JSONObject(jsonStr)
+                val success = json.optBoolean("success", false)
+
+                if (!success) {
+                    val err = json.optString("errorMessage", "增量同步失败")
+                    return Result.failure(Exception(err))
+                }
+
+                val trashedIds = mutableSetOf<String>()
+                val newPhotos = parsePhotoItems(json.optJSONArray("photos"), trashedIds)
+                val deletedIds = parseStringArray(json.optJSONArray("deletedIds"))
+                val nextToken = json.optString("syncToken", currentSyncToken)
+                val moreComing = json.optBoolean("moreComing", false)
+
+                // Trashed records come back in the change feed as ordinary updates (the record
+                // still exists, only `isDeleted` flipped). Treat them exactly like tombstones.
+                val removedIds = (deletedIds + trashedIds).distinct()
+                if (removedIds.isNotEmpty()) {
+                    val affectedMonths = photoDao.getYearMonthsForIds(removedIds)
+                    Log.d(TAG, "Deleting ${removedIds.size} removed assets from local db (affected months: $affectedMonths)")
+                    photoDao.deleteByIds(removedIds)
+                    if (affectedMonths.isNotEmpty()) {
+                        rebuildMonthIndexFor(affectedMonths)
+                    }
+                    ICloudImageLoaderFactory.evictAssets(removedIds)
+                    // Authoritative: never let the same record come back.
+                    rememberPurged(removedIds, source = "changes")
+                    totalChanged += removedIds.size
+                }
+
+                if (newPhotos.isNotEmpty()) {
+                    // A change feed replayed from an older `syncToken` can re-deliver an asset whose
+                    // CPLAsset still exists but carries `isDeleted = 1` ("Recently Deleted"). The
+                    // record is not a tombstone, so it arrives as a normal create. We already know
+                    // from the expunge sweep that it is gone — drop it instead of resurrecting it.
+                    val resurrected = newPhotos.filter { isPurged(it.id) || isPurged(it.masterId) }
+                    val upsertable = if (resurrected.isEmpty()) {
+                        newPhotos
+                    } else {
+                        Log.d(
+                            TAG,
+                            "Skipping ${resurrected.size} change entries that are already purged: " +
+                                resurrected.take(5).map { it.filename }
+                        )
+                        newPhotos - resurrected.toSet()
+                    }
+
+                    if (upsertable.isNotEmpty()) {
+                        Log.d(TAG, "Upserting ${upsertable.size} new/modified photos to local db")
+                        photoDao.upsertAll(upsertable)
+                        // Keep the month sections in step, or the synced photos stay stranded at
+                        // yearMonth = 0 and never appear in the gallery (P2-016).
+                        rebuildMonthIndexFor(upsertable.map { it.yearMonth }.distinct())
+                        totalChanged += upsertable.size
+                    }
+                }
+
+                currentSyncToken = nextToken
+                syncStateDao.setSyncState(
+                    SyncStateEntity(
+                        key = KEY_PRIMARY_SYNC,
+                        syncToken = nextToken,
+                        continuationMarker = state?.continuationMarker,
+                        hasMore = state?.hasMore ?: false,
+                        lastSyncTime = System.currentTimeMillis()
+                    )
+                )
+
+                if (!moreComing) {
+                    break
+                }
+            }
+
+            return Result.success(totalChanged)
+        } catch (e: Exception) {
+            Log.e(TAG, "syncIncremental error", e)
+            return Result.failure(e)
+        }
+    }
+
+    /**
+     * Purges assets currently in the cloud "Recently Deleted" album from local storage.
+     *
+     * Queries CloudKit's `CPLAssetAndMasterDeletedByExpungedDate` view, identifies matching local
+     * assets, deletes them, refreshes affected month sections, and evicts Coil caches.
+     *
+     * Takes [dataMutationMutex] like the other mutation paths, because it reads month ids and then
+     * deletes rows — interleaving with an incremental sync would let one of them act on stale data.
+     */
+    suspend fun purgeRecentlyDeleted(): Result<Int> = dataMutationMutex.withLock {
+        withContext(Dispatchers.IO) {
+            purgeRecentlyDeletedLocked()
+        }
+    }
+
+    private suspend fun purgeRecentlyDeletedLocked(): Result<Int> {
+        wipeBlocked()?.let { return Result.failure(it.exceptionOrNull()!!) }
+        var sessionCheck = ensureGoSession()
+        if (sessionCheck.isFailure) {
+            return Result.failure(sessionCheck.exceptionOrNull() ?: Exception("会话建立失败"))
+        }
+
+        try {
+            var jsonStr = Icloudcore.fetchRecentlyDeleted()
             if (isAuthError(jsonStr)) {
-                Log.w(TAG, "syncIncremental returned auth error, forcing session refresh...")
+                Log.w(TAG, "fetchRecentlyDeleted returned auth error, forcing session refresh...")
                 sessionCheck = ensureGoSession(force = true)
                 if (sessionCheck.isFailure) {
-                    return@withContext Result.failure(sessionCheck.exceptionOrNull() ?: Exception("会话重建失败"))
+                    return Result.failure(sessionCheck.exceptionOrNull() ?: Exception("会话重建失败"))
                 }
-                jsonStr = Icloudcore.fetchChanges(syncToken, limit.toLong())
+                jsonStr = Icloudcore.fetchRecentlyDeleted()
+            }
+
+            val error = classifyCoreResponse(jsonStr)
+            if (error.kind != CoreErrorKind.NONE) {
+                return Result.failure(Exception(error.message))
             }
 
             val json = JSONObject(jsonStr)
-            val success = json.optBoolean("success", false)
-
-            if (!success) {
-                val err = json.optString("errorMessage", "增量同步失败")
-                return@withContext Result.failure(Exception(err))
+            val deletedIds = parseStringArray(json.optJSONArray("deletedIds")).distinct()
+            Log.d(TAG, "purgeRecentlyDeleted - cloud reported ${deletedIds.size} recently-deleted ids")
+            if (deletedIds.isEmpty()) {
+                return Result.success(0)
             }
 
-            val newPhotos = parsePhotoItems(json.optJSONArray("photos"))
-            val deletedIds = parseStringArray(json.optJSONArray("deletedIds"))
-            val nextToken = json.optString("syncToken", syncToken)
-            val moreComing = json.optBoolean("moreComing", false)
-
-            if (deletedIds.isNotEmpty()) {
-                Log.d(TAG, "Deleting ${deletedIds.size} removed assets from local db")
-                photoDao.deleteByIds(deletedIds)
+            val affectedMonths = photoDao.getYearMonthsForIds(deletedIds)
+            if (affectedMonths.isEmpty()) {
+                // None of the deleted ids match a cached row, but they must still be remembered:
+                // a stale syncToken replay would otherwise re-insert them.
+                rememberPurged(deletedIds, source = "expunge")
+                return Result.success(0)
             }
 
-            if (newPhotos.isNotEmpty()) {
-                Log.d(TAG, "Upserting ${newPhotos.size} new/modified photos to local db")
-                photoDao.upsertAll(newPhotos)
-                // Keep the month sections in step, or the synced photos stay stranded at
-                // yearMonth = 0 and never appear in the gallery (P2-016).
-                rebuildMonthIndexFor(newPhotos.map { it.yearMonth }.distinct())
-            }
-
-            syncStateDao.setSyncState(
-                SyncStateEntity(
-                    key = KEY_PRIMARY_SYNC,
-                    syncToken = nextToken,
-                    continuationMarker = state?.continuationMarker,
-                    hasMore = state?.hasMore ?: false,
-                    lastSyncTime = System.currentTimeMillis()
-                )
+            Log.d(
+                TAG,
+                "Purging recently deleted assets: ${deletedIds.size} cloud ids, " +
+                    "months=$affectedMonths"
             )
+            photoDao.deleteByIds(deletedIds)
+            rebuildMonthIndexFor(affectedMonths)
+            ICloudImageLoaderFactory.evictAssets(deletedIds)
+            rememberPurged(deletedIds, source = "expunge")
 
-            Result.success(newPhotos.size)
+            return Result.success(deletedIds.size)
         } catch (e: Exception) {
-            Log.e(TAG, "syncIncremental error", e)
-            Result.failure(e)
+            Log.e(TAG, "purgeRecentlyDeleted error", e)
+            return Result.failure(e)
         }
     }
 
@@ -884,7 +1232,14 @@ class PhotoRepository(
                     val orig = masterUrls.optString("originalUrl").ifBlank { null }
                     val vid = masterUrls.optString("videoComplUrl").ifBlank { null }
 
-                    photoDao.updateUrls(masterId, thumb, med, orig, vid, now, generation)
+                    // `/records/lookup` answers per master, but rows are keyed per asset: several
+                    // assets can share one master, so every row pointing at it receives the same
+                    // fresh signature (each with its own `urlFetchedAt`, which is what the Coil
+                    // interceptor's staleness check reads).
+                    val rows = photoDao.getPhotosByMasterId(masterId)
+                    for (row in rows) {
+                        photoDao.updateUrls(row.id, thumb, med, orig, vid, now, generation)
+                    }
                     out[masterId] = RefreshedUrls(thumb, med, orig, vid)
                 }
 
@@ -900,11 +1255,148 @@ class PhotoRepository(
         }
 
     private suspend fun readUrlsFromDb(masterId: String): Result<RefreshedUrls> {
-        val row = photoDao.getPhotoByMasterId(masterId)
+        // Any row of the group will do: `/records/lookup` answered per master, so every asset
+        // sharing it gets the same set of URLs.
+        val row = photoDao.getPhotosByMasterId(masterId).firstOrNull()
             ?: return Result.failure(Exception("Master $masterId not found in local db"))
         return Result.success(
             RefreshedUrls(row.thumbUrl, row.medUrl, row.originalUrl, row.videoComplUrl)
         )
+    }
+
+    // ----------------------------------------------------------------------------------------
+    // EXIF / GPS metadata (info panel)
+    // ----------------------------------------------------------------------------------------
+
+    /**
+     * Resolves EXIF/GPS for one asset, caching the result in Room.
+     *
+     * Returns the raw JSON emitted by `icloudcore.FetchPhotoMetadata`. An **empty string is a
+     * success**, meaning "fetched, and this record has no embedded metadata" (third-party imports,
+     * plain screenshots). Callers rely on that distinction to fall back to file-info rendering
+     * instead of showing an error.
+     *
+     * Caching:
+     *  - `exifFetchedAt > 0` and inside [METADATA_TTL_MS] returns the stored value without any
+     *    network call, including cached negatives.
+     *  - [force] re-fetches regardless, for an explicit "retry" affordance.
+     *
+     * De-duplication mirrors [refreshUrlsForMaster]: opening the info card twice in quick
+     * succession, or tapping it while the first request is in flight, must not fire two lookups.
+     *
+     * Error policy follows AGENTS.md §7.1: only `AUTH_EXPIRED` is worth rebuilding the session for.
+     * A timeout or a throttle is surfaced to the caller for a plain retry, because a rebuild costs
+     * a `/validate` round trip and re-signs every cached URL.
+     */
+    suspend fun fetchMetadata(masterId: String, force: Boolean = false): Result<String> {
+        wipeBlocked()?.let { return Result.failure(it.exceptionOrNull()!!) }
+
+        if (masterId.isBlank()) {
+            return Result.failure(Exception("缺少 masterId，无法获取元数据"))
+        }
+
+        if (!force) {
+            val cached = readMetadataFromDb(masterId)
+            if (cached != null) return Result.success(cached)
+        }
+
+        val existing = metadataMutex.withLock { inFlightMetadata[masterId] }
+        if (existing != null) {
+            Log.d(TAG, "fetchMetadata joining in-flight request master=$masterId")
+            return existing.await()
+        }
+
+        val deferred = refreshScope.async {
+            try {
+                doFetchMetadata(masterId)
+            } finally {
+                metadataMutex.withLock { inFlightMetadata.remove(masterId) }
+            }
+        }
+
+        metadataMutex.withLock { inFlightMetadata[masterId] = deferred }
+        return deferred.await()
+    }
+
+    /**
+     * Returns the cached metadata JSON, or null when it has never been fetched or has aged out.
+     *
+     * Empty string is returned as-is: it is the cached negative result.
+     */
+    private suspend fun readMetadataFromDb(masterId: String): String? = withContext(Dispatchers.IO) {
+        // EXIF describes the master (the file), so any asset of the group shares the cached answer.
+        val row = runCatching { photoDao.getPhotosByMasterId(masterId).firstOrNull() }
+            .getOrNull()
+            ?: return@withContext null
+        val json = row.exifJson ?: return@withContext null
+        val age = System.currentTimeMillis() - row.exifFetchedAt
+        // A cached *negative* is kept forever: a record that has no EXIF today will not grow one.
+        // A cached *positive* expires, because metadata can legitimately be re-written server-side.
+        if (json.isEmpty()) return@withContext json
+        if (row.exifFetchedAt <= 0 || age > METADATA_TTL_MS) return@withContext null
+        json
+    }
+
+    private suspend fun doFetchMetadata(masterId: String): Result<String> = withContext(Dispatchers.IO) {
+        var sessionCheck = ensureGoSession()
+        if (sessionCheck.isFailure) {
+            return@withContext Result.failure(
+                sessionCheck.exceptionOrNull() ?: Exception("会话建立失败")
+            )
+        }
+
+        try {
+            val payload = JSONArray().apply { put(masterId) }.toString()
+            var jsonStr = Icloudcore.fetchPhotoMetadata(payload)
+            var classified = classifyCoreResponse(jsonStr)
+
+            if (classified.kind == CoreErrorKind.AUTH_EXPIRED) {
+                Log.w(TAG, "fetchMetadata auth expired, forcing session refresh master=$masterId")
+                sessionCheck = ensureGoSession(force = true)
+                if (sessionCheck.isFailure) {
+                    return@withContext Result.failure(
+                        sessionCheck.exceptionOrNull() ?: Exception("会话重建失败")
+                    )
+                }
+                jsonStr = Icloudcore.fetchPhotoMetadata(payload)
+                classified = classifyCoreResponse(jsonStr)
+            }
+
+            if (classified.kind != CoreErrorKind.NONE) {
+                Log.w(TAG, "fetchMetadata failed (${classified.kind}): ${classified.message}")
+                return@withContext Result.failure(
+                    Exception(
+                        when (classified.kind) {
+                            CoreErrorKind.TIMEOUT, CoreErrorKind.NETWORK ->
+                                "网络请求失败，请检查网络后重试"
+                            CoreErrorKind.RATE_LIMITED -> "请求过于频繁，请稍后重试"
+                            else -> classified.message.ifBlank { "获取照片信息失败" }
+                        }
+                    )
+                )
+            }
+
+            val json = JSONObject(jsonStr)
+            val items = json.optJSONObject("items")
+            val entry = items?.optJSONObject(masterId)
+
+            // No entry at all: the record vanished server-side. Treat as a cached negative rather
+            // than an error, so the panel degrades to file info instead of showing a failure.
+            val metadataJson = entry?.toString() ?: ""
+
+            val now = System.currentTimeMillis()
+            photoDao.setExif(masterId, metadataJson, now)
+            Log.d(
+                TAG,
+                "fetchMetadata ok master=$masterId bytes=${metadataJson.length} " +
+                    "hasMetadata=${entry?.optBoolean("hasMetadata", false) == true}"
+            )
+
+            Result.success(metadataJson)
+        } catch (e: Exception) {
+            Log.e(TAG, "fetchMetadata error", e)
+            Result.failure(e)
+        }
     }
 
     private suspend fun doRefreshUrlsForMaster(masterId: String): Result<RefreshedUrls> = withContext(Dispatchers.IO) {
@@ -945,15 +1437,21 @@ class PhotoRepository(
                 val vid = masterUrls.optString("videoComplUrl").ifBlank { null }
 
                 val fetchedAt = System.currentTimeMillis()
-                photoDao.updateUrls(
-                    masterId = masterId,
-                    thumbUrl = thumb,
-                    medUrl = med,
-                    originalUrl = orig,
-                    videoComplUrl = vid,
-                    fetchedAt = fetchedAt,
-                    sessionGeneration = sessionManager.getSessionGeneration()
-                )
+                val generation = sessionManager.getSessionGeneration()
+                // One master can back several assets; give each row the fresh signature so its own
+                // `urlFetchedAt` (and therefore its staleness verdict) is correct.
+                val rows = photoDao.getPhotosByMasterId(masterId)
+                for (row in rows) {
+                    photoDao.updateUrls(
+                        assetId = row.id,
+                        thumbUrl = thumb,
+                        medUrl = med,
+                        originalUrl = orig,
+                        videoComplUrl = vid,
+                        fetchedAt = fetchedAt,
+                        sessionGeneration = generation
+                    )
+                }
 
                 Result.success(RefreshedUrls(thumb, med, orig, vid))
             } else {
@@ -965,7 +1463,21 @@ class PhotoRepository(
         }
     }
 
-    private fun parsePhotoItems(arr: JSONArray?): List<PhotoAssetEntity> {
+    private fun parsePhotoItems(arr: JSONArray?): List<PhotoAssetEntity> =
+        parsePhotoItems(arr, mutableSetOf())
+
+    /**
+     * Parses Go photo items into rows, dropping anything flagged `isDeleted`.
+     *
+     * [trashedIds] receives the identities of the skipped rows (asset id and master id), so the
+     * caller can delete any stale copy already sitting in Room. That is what stops a photo the
+     * user deleted on another device from surviving here: CloudKit keeps the record (marked
+     * deleted) for 30 days, so it arrives in every query just like a live one.
+     */
+    private fun parsePhotoItems(
+        arr: JSONArray?,
+        trashedIds: MutableSet<String>
+    ): List<PhotoAssetEntity> {
         if (arr == null) return emptyList()
         val list = mutableListOf<PhotoAssetEntity>()
         val now = System.currentTimeMillis()
@@ -988,6 +1500,10 @@ class PhotoRepository(
             val addedDate = obj.optLong("addedDate", 0L).takeIf { it > 0L } ?: assetDate
             val isFavorite = obj.optBoolean("isFavorite", false)
             val isHidden = obj.optBoolean("isHidden", false)
+            // `isDeleted` means the asset sits in "Recently Deleted". It is not a tombstone: the
+            // record still exists and would otherwise be written into the gallery as a normal
+            // photo. Rows flagged here are dropped before they ever reach Room.
+            val isDeleted = obj.optBoolean("isDeleted", false)
             val duration = obj.optLong("duration", 0)
             val mediaType = obj.optString("mediaType", "IMAGE")
             val itemType = obj.optString("itemType", "")
@@ -999,6 +1515,13 @@ class PhotoRepository(
             val originalUrl = obj.optString("originalUrl").ifBlank { null }
             val videoComplUrl = obj.optString("videoComplUrl").ifBlank { null }
             val changeTag = obj.optString("recordChangeTag").ifBlank { null }
+
+            if (isDeleted) {
+                // Counted by the caller so the sweep can delete whatever stale copy still exists.
+                trashedIds.add(id)
+                if (masterId != id) trashedIds.add(masterId)
+                continue
+            }
 
             list.add(
                 PhotoAssetEntity(
@@ -1149,10 +1672,28 @@ class PhotoRepository(
         const val KEY_PRIMARY_SYNC = "PRIMARY_SYNC"
 
         /**
+         * How many ids of a pending purge are printed before the deletion runs.
+         *
+         * The reconcile pass is the only place a live row can disappear, so the ids are logged
+         * beforehand. Printing thousands of 36-character ids would drown the log, and the count is
+         * enough to correlate with the database afterwards.
+         */
+        private const val PURGE_LOG_SAMPLE = 10
+
+        /**
          * Window within which a successful URL refresh for a given master is reused instead of
          * hitting `/records/lookup` again (P2-008).
          */
         private const val REFRESH_DEDUP_WINDOW_MS = 5 * 60 * 1000L
+
+        /**
+         * How long a fetched EXIF payload stays authoritative.
+         *
+         * Long on purpose: EXIF describes the capture itself, which never changes. A day only
+         * exists so that metadata Apple re-writes server-side (e.g. after an edit) eventually
+         * refreshes. Cached *negatives* ignore this value entirely — see `readMetadataFromDb`.
+         */
+        private const val METADATA_TTL_MS: Long = 24L * 60 * 60 * 1000
 
         /**
          * Matches an explicit HTTP status token such as `HTTP 401`, `status:421`, `StatusCode=401`.
