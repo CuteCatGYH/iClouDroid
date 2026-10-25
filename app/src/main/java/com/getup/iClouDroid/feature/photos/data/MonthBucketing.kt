@@ -50,4 +50,13 @@ internal object MonthBucketing {
         if (yearMonth <= 0) return "未分组"
         return yearOf(yearMonth).toString()
     }
+
+    /** Label shown in the month grid of the jump panel, e.g. `8月`. */
+    fun monthLabelOf(yearMonth: Int): String {
+        if (yearMonth <= 0) return "未分组"
+        return "${monthOf(yearMonth)}月"
+    }
+
+    /** Label for a bare month number (1..12), used by the grid's placeholder cells. */
+    fun monthNumberLabelOf(month: Int): String = "${month}月"
 }

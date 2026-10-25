@@ -90,6 +90,7 @@ fun PhotosScreen(
     val monthPhotos by viewModel.monthPhotos.collectAsStateWithLifecycle()
     val monthDaysMap by viewModel.monthDaysMap.collectAsStateWithLifecycle()
     val viewMode by viewModel.galleryViewMode.collectAsStateWithLifecycle()
+    val monthCoverEnabled by viewModel.monthCoverEnabled.collectAsStateWithLifecycle()
 
     val gridColumns = if (viewMode == GalleryViewMode.DAY) 3 else 5
 
@@ -323,6 +324,9 @@ fun PhotosScreen(
                 }
 
                 if (monthIndex.isNotEmpty()) {
+                    // The jump panel takes the full height (its year column scrolls) but only its
+                    // own width — `fillMaxSize()` here would make the tap-outside barrier cover the
+                    // whole gallery and swallow every thumbnail tap.
                     MonthIndexBar(
                         currentYearMonth = currentMonth,
                         months = monthIndex,
@@ -337,8 +341,12 @@ fun PhotosScreen(
                             }
                         },
                         modifier = Modifier
-                            .align(Alignment.CenterEnd)
-                            .fillMaxSize()
+                            .align(Alignment.TopEnd)
+                            .padding(top = 12.dp, bottom = 12.dp),
+                        // null = the user switched month covers off. Passing null rather than an
+                        // empty flow is what stops the card subscribing to the cover query at all,
+                        // so a disabled feature costs nothing.
+                        coverRowsOf = if (monthCoverEnabled) viewModel::coverRows else null
                     )
                 }
             }

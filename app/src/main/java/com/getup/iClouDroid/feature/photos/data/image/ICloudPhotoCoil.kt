@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import coil.ImageLoader
 import coil.decode.ImageDecoderDecoder
+import coil.disk.DiskCache
 import coil.intercept.Interceptor
 import coil.key.Keyer
 import coil.request.ErrorResult
@@ -139,11 +140,19 @@ class ICloudPhotoInterceptor(
 
         val stableKey = "icloud_${data.recordName}_${data.quality.name.lowercase()}"
 
-        // Cache-only base layer: never mint a URL, never retry. A miss is fine — this layer exists
-        // solely to paint an already-decoded bitmap instantly under the sharp layer, and firing a
-        // refresh here would race the sharp layer's own lookup for no visual gain.
+        // Cache-only: never mint a URL, never retry. A miss is fine.
+        //
+        // NOTE: this must NOT go through `buildRequest`, which replaces `data` with the URL. A
+        // cache-only caller deliberately has no URL (it is asking "give me whatever is already
+        // cached for this key"), and substituting `""` replaces the image source with an empty
+        // string — no fetcher can handle that, so the request fails without ever consulting the
+        // disk cache. The key alone is what makes the lookup work.
         if (data.cacheOnly) {
-            return chain.proceed(buildRequest(request, data.url, stableKey))
+            val keyed = request.newBuilder()
+                .memoryCacheKey(stableKey)
+                .diskCacheKey(stableKey)
+                .build()
+            return chain.proceed(keyed)
         }
 
         val currentGeneration = sessionManager.getSessionGeneration()
@@ -295,6 +304,15 @@ object ICloudImageLoaderFactory {
     private var INSTANCE: ImageLoader? = null
 
     /**
+     * Ceiling for the thumbnail disk cache.
+     *
+     * 256MB covers roughly 5,000 thumbnails at ~50KB each, which is several screens' worth of
+     * scrolling in each direction - far more than the jump card or the grid will ask for at once.
+     * Coil evicts by LRU past this, so it is a cap on disk usage rather than a quota to fill.
+     */
+    private const val DISK_CACHE_MAX_BYTES = 256L * 1024 * 1024
+
+    /**
      * Builds (once) the Coil loader for iCloud assets.
      *
      * Dependencies come from [com.getup.iClouDroid.di.AppContainer] rather than being constructed
@@ -314,12 +332,35 @@ object ICloudImageLoaderFactory {
                     add(ICloudPhotoKeyer())
                     add(ICloudPhotoInterceptor(container.photoRepository, container.sessionManager))
                 }
+                // Disk cache must be attached EXPLICITLY. Coil only installs its default disk cache
+                // when the loader comes from `Coil.imageLoader(context)`; a hand-built
+                // `ImageLoader.Builder(context).build()` has none. Without this line every
+                // "prefetch" reported success while writing nothing, `clearCaches()` silently
+                // no-oped, and a cold start re-downloaded every visible thumbnail — the cache in
+                // `cache/image_cache` was being written by the *latter* path only.
+                .diskCache {
+                    DiskCache.Builder()
+                        .directory(context.cacheDir.resolve("image_cache"))
+                        .maxSizeBytes(DISK_CACHE_MAX_BYTES)
+                        .build()
+                }
                 .crossfade(true)
                 .build()
             INSTANCE = loader
             loader
         }
     }
+
+    /**
+     * The already-built loader, or null if nothing has asked for it yet.
+     *
+     * For background work that only *uses* the cache and has no business constructing the loader:
+     * if it does not exist, nothing has ever rendered a thumbnail, so there is no warm cache to
+     * populate and there is nothing to do. Background callers should treat null as "skip", not
+     * "build it" — building from a worker thread would race `Application.onCreate`'s warm-up and
+     * defeat the very contention that warm-up exists to avoid.
+     */
+    fun peek(): ImageLoader? = INSTANCE
 
     /**
      * Builds the loader and touches its disk cache ahead of first use.

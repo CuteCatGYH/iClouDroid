@@ -35,7 +35,7 @@ import com.getup.iClouDroid.feature.photos.data.db.SyncStateEntity
         ScanSeenIdEntity::class,
         PurgedIdEntity::class
     ],
-    version = 7,
+    version = 8,
     exportSchema = false
 )
 abstract class PhotoDatabase : RoomDatabase() {
@@ -170,6 +170,21 @@ abstract class PhotoDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v7 → v8: month cover asset for the gallery's jump card.
+         *
+         * Additive and DDL-only. The column is nullable with no default and nothing is backfilled:
+         * the correct value depends on `photo_assets` (the newest asset per month), and computing
+         * it here would mean a correlated subquery over a 15k-row table inside the migration's
+         * transaction. A NULL cover simply renders as a text cell until the next scan fills it in,
+         * which is a graceful state rather than a broken one.
+         */
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE photo_month_index ADD COLUMN coverAssetId TEXT")
+            }
+        }
+
         @Volatile
         private var INSTANCE: PhotoDatabase? = null
 
@@ -189,7 +204,13 @@ abstract class PhotoDatabase : RoomDatabase() {
                     PhotoDatabase::class.java,
                     "icloud_photos.db"
                 )
-                    .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+                    .addMigrations(
+                        MIGRATION_3_4,
+                        MIGRATION_4_5,
+                        MIGRATION_5_6,
+                        MIGRATION_6_7,
+                        MIGRATION_7_8
+                    )
                     .build()
                 INSTANCE = instance
                 instance

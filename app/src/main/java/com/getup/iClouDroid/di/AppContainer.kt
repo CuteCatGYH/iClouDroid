@@ -42,7 +42,7 @@ class AppContainer(private val appContext: Context) {
     }
 
     val photoRepository: PhotoRepository by lazy {
-        PhotoRepository(photoDatabase, sessionManager)
+        PhotoRepository(photoDatabase, sessionManager, appSettings, appContext)
     }
 
     /**
@@ -53,7 +53,7 @@ class AppContainer(private val appContext: Context) {
      * `MonthScanWorker`. Both paths contend on the same instance, which serialises them.
      */
     val monthScanEngine: MonthScanEngine by lazy {
-        MonthScanEngine(photoDatabase, photoRepository)
+        MonthScanEngine(photoDatabase, photoRepository, appSettings)
     }
 
     val localAlbumRepository: com.getup.iClouDroid.feature.local.data.LocalAlbumRepository by lazy {

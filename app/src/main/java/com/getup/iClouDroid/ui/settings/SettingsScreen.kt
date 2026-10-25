@@ -77,6 +77,7 @@ fun SettingsScreen(
     val customDays by settings.customIntervalDays.collectAsStateWithLifecycle()
     val themeMode by settings.themeMode.collectAsStateWithLifecycle()
     val useDynamicColor by settings.useDynamicColor.collectAsStateWithLifecycle()
+    val monthCoverEnabled by settings.monthCoverEnabled.collectAsStateWithLifecycle()
 
     var showScanWarning by remember { mutableStateOf(false) }
 
@@ -151,6 +152,7 @@ fun SettingsScreen(
                                 settings = settings,
                                 themeMode = themeMode,
                                 useDynamicColor = useDynamicColor,
+                                monthCoverEnabled = monthCoverEnabled,
                                 frequency = frequency,
                                 customDays = customDays,
                                 isFullScanRunning = isFullScanRunning,
@@ -245,6 +247,7 @@ private fun SettingsRow(
     settings: AppSettings,
     themeMode: ThemeMode,
     useDynamicColor: Boolean,
+    monthCoverEnabled: Boolean,
     frequency: ScanFrequency,
     customDays: Int,
     isFullScanRunning: Boolean,
@@ -290,6 +293,37 @@ private fun SettingsRow(
                     onCheckedChange = { settings.setUseDynamicColor(it) }
                 )
             }
+        }
+
+        SettingsItem.MONTH_COVER_PREVIEW -> Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "月份封面预览",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    // States the non-obvious half: turning this off also stops the download, so
+                    // a user reaching for it to save space gets what they expect.
+                    text = if (monthCoverEnabled) {
+                        "跳转面板显示每月照片封面；关闭后不再下载封面"
+                    } else {
+                        "已关闭，月份以纯文本显示且不占用存储"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Switch(
+                checked = monthCoverEnabled,
+                onCheckedChange = { settings.setMonthCoverEnabled(it) }
+            )
         }
 
         SettingsItem.CLOUD_MEDIA_PROVIDER -> {

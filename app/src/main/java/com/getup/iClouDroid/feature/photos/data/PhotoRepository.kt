@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.getup.iClouDroid.BuildConfig
 import com.getup.iClouDroid.data.session.SessionManager
+import com.getup.iClouDroid.feature.photos.data.db.MonthCoverRow
 import com.getup.iClouDroid.feature.photos.data.db.PhotoAssetEntity
 import com.getup.iClouDroid.feature.photos.data.db.PhotoMonthIndexEntity
 import com.getup.iClouDroid.feature.photos.data.db.PurgedIdDao
@@ -11,6 +12,7 @@ import com.getup.iClouDroid.feature.photos.data.db.PurgedIdEntity
 import com.getup.iClouDroid.feature.photos.data.db.ScanSeenIdEntity
 import com.getup.iClouDroid.feature.photos.data.db.SyncStateEntity
 import com.getup.iClouDroid.feature.photos.data.image.ICloudImageLoaderFactory
+import com.getup.iClouDroid.feature.photos.data.image.ICloudImageModel
 import com.getup.icloudcore.Icloudcore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -203,7 +205,23 @@ internal fun parseCookiePairs(cookieStr: String?): Set<Pair<String, String>> {
 
 class PhotoRepository(
     private val database: PhotoDatabase,
-    private val sessionManager: SessionManager
+    private val sessionManager: SessionManager,
+    /**
+     * Read for [monthCoverEnabled] only.
+     *
+     * The repository — not the UI — has to consult this, because the two expensive halves of the
+     * cover feature live here: the per-month `newestInMonth` lookup during a scan, and the
+     * download pass afterwards. Hiding the images while still paying both costs would be the
+     * worst of both outcomes (see AGENTS §10.0).
+     */
+    private val appSettings: com.getup.iClouDroid.data.settings.AppSettings,
+    /**
+     * Only used to build the Coil `ImageRequest` for [prefetchMonthCovers].
+     *
+     * Held as the application context, so this is not a leak and does not tie the repository to
+     * any Activity.
+     */
+    private val appContext: Context
 ) {
     private val photoDao = database.photoDao()
     private val syncStateDao = database.syncStateDao()
@@ -311,25 +329,116 @@ class PhotoRepository(
      *
      * Room cannot express `INSERT ... SELECT` with aggregates, so this is a read-then-upsert per
      * month. Only called for months that were actually touched, so it stays cheap.
+     *
+     * ## Why the cover backfill lives here
+     *
+     * Every write path — the full walk, incremental sync, the periodic worker, a manual refresh —
+     * ends up in this function. Putting the cover selection here therefore covers all of them
+     * without touching a single line of scan scheduling, and it costs one extra indexed query per
+     * *month* rather than per photo (a 15k-item library is ~200 months, not 15k queries).
      */
     private suspend fun rebuildMonthIndexFor(yearMonths: List<Int>) {
+        val coversWanted = appSettings.monthCoverEnabled.value
         for (ym in yearMonths) {
             if (ym <= 0) continue
             val aggregate = photoDao.monthAggregate(ym) ?: continue
             if (aggregate.itemCount <= 0) {
                 photoMonthIndexDao.deleteMonth(ym)
             } else {
+                // Skipped entirely when the user has cover previews off: the column stays null and
+                // the jump card renders text cells, with no lookup and no download.
+                val cover = if (coversWanted) photoDao.newestInMonth(ym)?.id else null
                 photoMonthIndexDao.upsert(
                     PhotoMonthIndexEntity(
                         yearMonth = ym,
                         itemCount = aggregate.itemCount,
                         firstAssetDate = aggregate.firstAssetDate ?: 0L,
                         lastAssetDate = aggregate.lastAssetDate ?: 0L,
-                        isComplete = false
+                        isComplete = false,
+                        coverAssetId = cover
                     )
                 )
             }
         }
+    }
+
+    /**
+     * Month rows for [year], each joined with its cover asset, newest month first.
+     *
+     * Subscribed by the gallery's jump card only while it is open, so a closed card costs nothing.
+     */
+    fun observeMonthCovers(year: Int): Flow<List<MonthCoverRow>> =
+        if (year <= 0) {
+            kotlinx.coroutines.flow.flowOf(emptyList())
+        } else {
+            photoMonthIndexDao.observeCoversInRange(
+                fromYearMonth = year * 100 + 1,
+                toYearMonth = year * 100 + 12
+            )
+        }
+
+    /**
+     * Downloads the cover thumbnails for [yearMonths] so the jump card opens pre-populated.
+     *
+     * ## Cost control
+     *
+     * A full walk touches ~200 months. Firing 200 CDN requests at once is exactly the burst
+     * AGENTS §6.2 warns about, so the months are processed in bounded shards, and each shard's
+     * URLs are re-minted with ONE batched `/records/lookup` rather than one per image.
+     *
+     * Downloads are sequential within a shard on purpose: the whole point is to fill a cache that
+     * nobody is waiting on, so there is no reason to compete with foreground thumbnail loads for
+     * the loader's bandwidth.
+     *
+     * ## Failure policy
+     *
+     * Every failure is swallowed and logged at debug level. A missing cover degrades to a text cell
+     * in the card; it must never fail a scan or block the walk's completion.
+     *
+     * @return how many covers were successfully brought into the Coil cache.
+     */
+    suspend fun prefetchMonthCovers(yearMonths: List<Int>): Int = withContext(Dispatchers.IO) {
+        if (!appSettings.monthCoverEnabled.value) return@withContext 0
+
+        val months = yearMonths.distinct().filter { it > 0 }
+        if (months.isEmpty()) return@withContext 0
+
+        // Reuse the app-scoped loader so covers land in the SAME cache the grid reads from.
+        // Null means nothing has rendered a thumbnail yet, so there is no cache to warm.
+        val loader = ICloudImageLoaderFactory.peek() ?: return@withContext 0
+        var done = 0
+
+        for (shard in months.chunked(COVER_PREFETCH_BATCH)) {
+            // Re-check per shard: the user may flip the switch while a long walk is still running.
+            if (!appSettings.monthCoverEnabled.value) return@withContext done
+
+            val covers = shard.mapNotNull { ym ->
+                runCatching { photoDao.newestInMonth(ym) }.getOrNull()
+            }
+            if (covers.isEmpty()) continue
+
+            // One lookup for the whole shard. A failure here is tolerable: the rows may still
+            // carry a live signature from when they were last synced.
+            runCatching { refreshUrlsForMasters(covers.map { it.masterId }) }
+
+            // Refresh first, THEN re-read: the lookup above may have just written fresh URLs, and
+            // loading the stale entity would throw those away.
+            for (asset in covers) {
+                if (!appSettings.monthCoverEnabled.value) return@withContext done
+                val fresh = runCatching { photoDao.getById(asset.id) }.getOrNull() ?: asset
+                val ok = runCatching {
+                    val request = coil.request.ImageRequest.Builder(appContext)
+                        .data(ICloudImageModel.fromEntity(fresh, ICloudImageModel.Quality.THUMB))
+                        .build()
+                    loader.execute(request)
+                }.onFailure {
+                    Log.d(TAG, "cover prefetch failed ym=${fresh.yearMonth}: ${it.message}")
+                }.getOrNull()
+                if (ok is coil.request.SuccessResult) done++
+            }
+        }
+        Log.i(TAG, "cover prefetch finished: $done/${months.size} months")
+        done
     }
 
     /**
@@ -1685,6 +1794,17 @@ class PhotoRepository(
          * hitting `/records/lookup` again (P2-008).
          */
         private const val REFRESH_DEDUP_WINDOW_MS = 5 * 60 * 1000L
+
+        /**
+         * How many months' cover URLs are re-minted per batched `/records/lookup`.
+         *
+         * Covers are fetched one image at a time (sequentially) within a batch, so this does not
+         * control download parallelism — it controls how many signatures are refreshed together.
+         * Go's `refreshAssetUrls` already accepts a JSON array, so a batch is one round trip.
+         * 50 keeps each lookup's response small while still covering a 200-month library in four
+         * calls instead of two hundred (AGENTS §6.2).
+         */
+        private const val COVER_PREFETCH_BATCH = 50
 
         /**
          * How long a fetched EXIF payload stays authoritative.

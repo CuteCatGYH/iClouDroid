@@ -220,6 +220,26 @@ interface PhotoDao {
     )
     suspend fun monthAggregate(yearMonth: Int): MonthAggregate?
 
+    /**
+     * The single asset that represents a month: newest by `assetDate`, ties broken by id.
+     *
+     * This is what the gallery's jump card shows as the month's cover. "Newest" rather than
+     * "last day of the month" because they are the same thing for any month that has photos on its
+     * final day, and this form is one indexed query instead of two — it also matches the first
+     * photo the user sees when they scroll into that month, so the cover is recognisable.
+     *
+     * Uses the `(yearMonth, assetDate, id)` index added in v4.
+     */
+    @Query(
+        """
+        SELECT * FROM photo_assets
+        WHERE isHidden = 0 AND yearMonth = :yearMonth
+        ORDER BY assetDate DESC, id ASC
+        LIMIT 1
+        """
+    )
+    suspend fun newestInMonth(yearMonth: Int): PhotoAssetEntity?
+
     /** Distinct months currently present, so the index can be rebuilt wholesale after a backfill. */
     @Query("SELECT DISTINCT yearMonth FROM photo_assets WHERE isHidden = 0 AND yearMonth != 0")
     suspend fun distinctYearMonths(): List<Int>
