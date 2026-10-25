@@ -16,6 +16,7 @@
 | [4](#4-icloud-协议开发红线) | iCloud 协议开发红线 |
 | [5](#5-会话生命周期session-lifecycle) | 会话生命周期 |
 | [6](#6-url-生命周期与刷新规范) | URL 生命周期与刷新 |
+| [6.7](#67-系统云端媒体提供方cloudmediaprovider) | **系统云端媒体提供方（必读）** |
 | [7](#7-错误判定规范) | 错误判定规范 |
 | [8](#8-日志与可观测性规范) | 日志与可观测性 |
 | [9](#9-验证纪律verification-discipline) | 验证纪律 |
@@ -342,6 +343,224 @@ Room 照片表与 Coil 缓存都以 `recordName` 为主键，而这些 ID 属于
 
 ---
 
+## 6.7 系统云端媒体提供方（CloudMediaProvider）
+
+`provider/ICloudMediaProvider.kt` 把已同步的照片暴露给系统照片选择器。
+这是整个项目里**最容易写出“代码全对但界面空白”**的模块，以下每条都是实测踩过的。
+
+### 6.7.1 白名单：系统默认不认我们的应用
+
+云端媒体提供方属于 **Google 的 OEM 试点项目**，受 `DeviceConfig` 白名单保护：
+
+```
+mediaprovider / storage_native_boot → allowed_cloud_providers
+```
+
+未入白名单的应用**不会**出现在系统「云端媒体设置」里——即使 Manifest 完全正确、
+`get_cloud_provider` 也返回了我们的 authority。
+
+**激活方式**（两者等价，后者可应用内一键完成）：
+
+| 途径 | 要求 |
+| --- | --- |
+| ADB / Shizuku | 持 `android.uid.shell`（UID 2000）→ `ShizukuMediaHelper` |
+| 纯应用内 | **不可行**。`MANAGE_CLOUD_MEDIA_PROVIDERS` 是 `signatureOrSystem` |
+
+### 6.7.2 游标契约（缺任一列都可能静默失效）
+
+`onQueryMedia` 必须包含以下列，且**行级 `SYNC_GENERATION` 必须与
+`onGetMediaCollectionInfo` 的 `LAST_MEDIA_SYNC_GENERATION` 完全相等**，否则系统丢弃该行：
+
+```
+ID, DATE_TAKEN_MILLIS, SYNC_GENERATION, MIME_TYPE, STANDARD_MIME_TYPE_EXTENSION,
+SIZE_BYTES, DURATION_MILLIS, WIDTH, HEIGHT, ORIENTATION, MEDIA_STORE_URI
+```
+
+> [!CAUTION]
+> **`MEDIA_STORE_URI` 缺失的最隐蔽后果**：格子会渲染出来，但系统**根本不发 `onOpenPreview`**。
+> 日志里表现为“某些图一次请求都没有”，极难归因。云端条目填 `null` 即可（不能省略该列）。
+
+**必须实现分页**（`EXTRA_PAGE_SIZE` / `EXTRA_PAGE_TOKEN`）。一次性返回全库会让 sync worker
+中途放弃，表现为“只有首屏可用”。
+
+### 6.7.3 MIME 既决定分类、也决定解码器（两者对视频冲突）
+
+`MIME_TYPE` 在契约里承担两件事：**条目分类**（照片/视频）与 **Glide 解码器选择**。
+对视频二者冲突：
+
+| 报什么 | 分类 | 格子 |
+| --- | --- | --- |
+| `video/mp4` | ✅ 正确 | ❌ `VideoDecoder` 用 `MediaMetadataRetriever` 去解我们返回的 JPEG，报 `setDataSource failed: status = 0xFFFFFFEA`（实测 2540 次）|
+| `image/jpeg` | ❌ 变成照片 | ✅ 能解 |
+
+**两个都不能选。** 正确做法是保持 `MIME_TYPE` 为真实类型，并让 `onOpenPreview`
+对视频行真的返回**视频容器**（详见 §6.7.5d）。
+
+> [!WARNING]
+> 本项目 **曾经选了 `image/jpeg` 来绕过解码失败**，结果就是“视频错误地显示为图片”。
+> 如果你的改动又想往这个方向走，先回去读 §6.7.5d。
+
+### 6.7.4 元数据变更必须 bump `SCHEMA_VERSION`
+
+系统按 `LAST_MEDIA_SYNC_GENERATION` 缓存行，值不变就**不重新查询**。
+改了任何列的取值规则（如上面的 MIME 修正），已安装设备仍会继续用旧行。
+
+```kotlin
+val generation = sessionGeneration * SCHEMA_VERSION   // 7 → 14
+```
+
+`SCHEMA_VERSION` 必须在 `onQueryMedia` 列值变化时**手工 +1**，并在注释里记历史。
+
+### 6.7.5a 分页必须是 keyset，绝不能是 OFFSET（ISS-035）
+
+> [!CAUTION]
+> **`LIMIT n OFFSET m` 在云端媒体提供方里是错的。**
+>
+> `photo_assets` 在 picker 打开期间**不是只读的**：增量同步会 `upsertAll` 新照片，
+> 月扫描与对账会 `deleteByIds`。OFFSET 锚定的是**行号**，任意一行增删都会让后面所有页
+> 整体漂移一位 —— 一行被**跳过**（用户看到“少了图”），一行被**重复**（系统按 `ID` 去重丢弃）。
+>
+> 漂移会随页数累加，所以它**恰好只在上滑进入早期年份时显形**（那是最后几十页）。
+> 症状组合极具误导性：宫格里有格子、点预览正常、下载正常，就是缩略图空白。
+
+**正确做法**：token 编码 `(assetDate, id)`，查询用 `WHERE (assetDate < :d OR (assetDate = :d AND id > :i))`。
+
+| 关键点 | 说明 |
+| --- | --- |
+| token 格式 | `"<assetDate>:<id>"`（不是 JSON，而是为了与旧的纯数字 OFFSET token 区分）|
+| 旧 token 兼容 | 纯数字 token 只可能来自上一版，只服务一页且绝不再发；否则系统持久化的 token 会解析失败 |
+| 排序键必须全序 | `ORDER BY assetDate DESC, id ASC` —— 大量照片共享同一秒，缺 `id` 决胜会让页边界不确定 |
+| 索引 | 仍命中 `(isHidden, assetDate, id)` |
+| 末页判定 | `page.size == pageSize` 才发 token。**`page.size < pageSize` 不等于结束**，最后一整页仍会带 token，需要容忍一次空页 |
+
+实现见 `PhotoDao.getMediaPageFirst` / `getMediaPageAfter`，回归测试 `MediaPageKeysetTest`。
+
+---
+
+### 6.7.5 预览请求是一次性的，不能“先返回失败等重试”
+
+实测结论（与常见假设相反）：
+
+| 事实 | 后果 |
+| --- | --- |
+| PhotoPicker 对宫格格子**只请求一次** | 返回 `FileNotFoundException` = 永久空白 |
+| `CancellationSignal` 在 ~250~400ms 就触发 | 但取消 **≠** 应丢弃已下数据 |
+| 冷缩略图需要 400~1200ms（换链 + CDN） | 单一超时必然漏图 |
+
+**正确做法：**
+1. 取消时**不删**已下字节，后台继续下完落盘
+2. **两级等待**：快档 1.2s、慢档 4s，超时后**再查一次磁盘**（`renameTo` 是下载线程最后一个动作）
+3. 命中 Coil 磁盘缓存（key `icloud_{recordName}_thumb`）直接秒回
+4. `onQueryMedia` 返回后**批量预热 URL**（消除每次首请求的 `/records/lookup`）
+
+### 6.7.5b `length() > 0` 不是“这是个图”，必须验魔数
+
+> [!CAUTION]
+> **`200` 响应不等于图片字节。** `cvws` 在签名失效时会在 **200 状态下**返回一小段 HTML/XML 错误正文，
+> `FileOutputStream` 会照写不误。一旦它以 `cmp_previews/<mediaId>.thumb` 落盘，
+> `length() > 0` 会让它**永久命中**，之后每次 `onOpenPreview` 都把这个垃圾交给 Glide，
+> 而下载路径再也不会被走到——因为文件永远“非空”。
+
+规则：
+
+| 位置 | 行为 |
+| --- | --- |
+| `isPlausiblePreview()` | 仅查前 12 字节容器魔数（JPEG/PNG/GIF/WebP/`ftyp`）+ 最小尺寸（512B），**不解码** |
+| 缓存命中 | 校验失败 → `delete()` → 走重新下载，而不是直接返回 |
+| `downloadToFile(requireImage = true)` | 预览必输：`.tmp` 落盘后先验魔数，不合格则**不 `renameTo`** |
+| `onOpenMedia` | 传 `requireImage = false`，因为全图可能是 mp4/mov |
+
+**为什么只查魔数不查尺寸**：这段代码跑在 binder 路径上，对每个冷格子做 `BitmapFactory` 解码
+比它保护的下载本身更贵。魔数已经足以捕获“截断”与“CDN 错误正文”两种真实故障。
+
+### 6.7.5c 视频缩略图永远不能降级到 `medUrl` / `originalUrl`
+
+降级链 `thumbUrl ?: medUrl ?: originalUrl` 对**照片**安全（三张同题材不同尺寸），
+对**视频**是错的：`medUrl` / `originalUrl` 就是 `mp4`/`mov` 字节本身。
+
+把它当成 `image/jpeg` 交给 Glide = 必然空白，且**这次请求不会重试**。
+实测 `/records/lookup` 偶尔会缺少 `thumbUrl`，而早期年份视频密度高
+（每 1000 条含 48~336 个），所以这个缺陷**也只在上滑到早期年份时才密集暴露**。
+
+**规则**：`mediaType in {VIDEO, LIVE_PHOTO}` → 只接受 `thumbUrl`，为空就返回 null
+（宁可一次可归因的 MISS，不要一个永远解不开的“成功”文件）。
+回归测试：`VideoThumbUrlTest`。
+
+### 6.7.5d MIME 描述“**它是什么**”，不是“你返回的字节”
+
+> [!CAUTION]
+> **本节曾经写反过，以下是修正后的结论。**
+> 早期版本的本文与 ISS-035 桹障七都说“视频报 `image/jpeg`”，理由是 `thumbUrl` 下到的是 JPEG。
+> 那确实让格子能显示，但**代价是视频被当成了照片**：没有时长角标、没有视频分类，
+> 调用方拿到的是 image 类型。用户看到的就是“视频错误地显示为图片”。
+
+`MIME_TYPE` 在契约里**承担两件事**：
+
+| 用途 | 看什么 |
+| --- | --- |
+| 条目**分类**（照片/视频、时长角标、筛选）| `MIME_TYPE` |
+| 格子**解码器**选择 | `MIME_TYPE` |
+
+对照片两者一致；对视频它们是冲突的（这是桹障七的根源）。**不能靠报 image 来绕过。**
+
+**正确做法：在契约指定的位置拆开。**
+
+| 列/方法 | 职责 |
+| --- | --- |
+| `MIME_TYPE` | 媒体**真实类型**：视频报 `video/mp4` / `video/quicktime` / `video/x-m4v` |
+| `onOpenPreview` | 履行契约另一半（“thumbnail 应与 MIME_TYPE 一致”）—— 视频行**返回真实视频容器**，让 `VideoDecoder` 能抓帧 |
+
+实现要点（`ICloudMediaProvider`）：
+
+1. `onOpenPreview` 先查 `isVideoAsset(mediaId)`（主键索引，相对下载很便宜）
+2. 视频 → 直接走 `getOrDownloadMediaFile`（与 `onOpenMedia` 同一份字节）
+3. 取不到 → 才回退到 JPEG 缩略图（宁可画个图，不要空格）
+4. 图片 → 维持原路径
+
+`.heic` 仍报 `image/jpeg`：它的 `thumbUrl` 是服务端转码 JPEG，报 `image/heic` 会让
+`BitmapDecoder` 去 JPEG 里找 HEIF 头——同类错误。但照片无论报哪个都是照片，所以没有分类代价。
+
+回归测试：`MediaMimeTypeTest`（含一条“视频永不解析为 image”的穷尽护栏）。
+
+### 6.7.5e `STANDARD_MIME_TYPE_EXTENSION` 救不了这个问题
+
+它只有四个值：`NONE` / `GIF` / `MOTION_PHOTO` / `ANIMATED_WEBP`。
+**没有“视频”这个值**，所以它无法用来把视频标记出来，别指望用它绕过上面的拆分。
+
+### 6.7.6 排查时必须看系统进程的日志
+
+自己的 provider 日志会显示 `openPreview OK bytes=83966 elapsed=1ms`——**完全正常**，
+而屏幕上依旧空白。真正的失败在 PhotoPicker 进程里：
+
+```bash
+adb logcat | grep -E "Glide|VideoDecoder|setDataSource|Failed to find any load path"
+```
+
+其余可用的诊断手段：
+
+| 手段 | 命令 |
+| --- | --- |
+| 当前激活的云端源 | `content call --uri content://media/ --method get_cloud_provider` |
+| 白名单是否生效 | `dumpsys activity provider .../MediaProvider \| grep allowedCloudProviderPackages` |
+| 系统缓存的代数 | `dumpsys ... \| grep cachedCloudMediaCollectionInfo` |
+| 预览文件是否落盘 | `run-as com.getup.iClouDroid ls -la cache/cmp_previews` |
+| 文件格式 | `run-as ... cat xxx.thumb \| head -c 12 \| od -An -tx1`（`ffd8ffe0` = JPEG）|
+
+自己的日志侧也加了两个可归因信号：
+
+| tag 行 | 含义 |
+| --- | --- |
+| `preview cached file is not an image ... head=<hex>` | 缓存里是坏字节，已丢弃重下 |
+| `resolveThumbUrl: video has no thumbUrl ...` | 视频缺缩略图，**拒绝**回退到视频字节 |
+| `openPreview extras media=... {...}` | 系统传了什么 extras（DEBUG，值截断 48 字符）|
+
+> [!WARNING]
+> **仍有已知残留**：快速向上滑入早期年份时，个别宫格仍空白。
+> 已修复三处确定性缺陷（keyset 分页 / 缓存魔数校验 / 视频降级链），
+> 详见 [ISS-035](CHANGELOG_ISSUES.md#iss-035photopicker-缩略图空白多层柹障式修复与已知残留)。
+
+---
+
 ## 7. 错误判定规范
 
 > 踩坑记录：ISS-001（Cookie 静默丢弃）、ISS-015（base64 误伤）。
@@ -487,9 +706,17 @@ app/src/main/java/com/getup/iClouDroid/
 │       │   ├── ViewerTransition.kt     # “从哪里来回哪里去”动画 + ThumbnailBoundsTracker
 │       │   └── PredictiveBackViewer.kt # 预测返回手势（需 manifest 开关，目前未生效）
 │       └── work/                       # MonthScanWorker、ScanScheduler、ScanNotificationHelper
+├── feature/local/                     # 本地相册（自包含，为 Phase 3 按文件夹备份预留）
+│   ├── data/LocalAlbum.kt             # 模型（含 isBackupEnabled 预留位）
+│   ├── data/LocalAlbumRepository.kt   # MediaStore 按 BUCKET_ID 归集文件夹
+│   └── ui/LocalAlbumsScreen.kt        # Albums 页（封面卡片 + 媒体权限引导）
+├── provider/                          # 系统云端媒体提供方（Android 13+）
+│   ├── ICloudMediaProvider.kt         # CloudMediaProvider 实现（游标/分页/预览/全图）
+│   └── ShizukuMediaHelper.kt          # Shizuku shell 权限 → 白名单注入 + 一键绑定
 └── ui/
     ├── AppShell.kt                    # 登录后的壳：底部导航 + 各功能入口 + 设置 overlay
     ├── PlaceholderScreen.kt           # 未实现功能的占位页
+    ├── theme/                         # ThemeMode 枚举 + IClouDroidTheme（深/浅色 + Monet 动态取色）
     ├── navigation/Destinations.kt     # AppDestination 枚举（新增功能在此登记）
     ├── settings/                      # SettingsScreen、SettingsCatalog（设置项登记处）
     └── auth/                          # AuthScreen、AuthViewModel、ICloudWebView、AccountInfoDialog
@@ -645,8 +872,24 @@ totalDragX > 0  →  右滑  →  上一张
 | Phase 1：混合鉴权与国区/国际区动态路由 | ✅ 完成 |
 | Phase 2：照片库拉取、全库月扫描分段、月分组展示与本地缓存（只读预览） | ✅ 完成 |
 | Phase 2.5：双向删除同步、全量对账、设置页与周期扫描 | ✅ 完成 |
+| Phase 2.6：Glimpse 风相册 UI、日/月视图、Monet 主题、本地相册、系统云端媒体提供方 | ✅ 完成（有已知残留）|
 | Phase 3：Android 本地相册自动备份（增量上传） | ⏳ 待开始 |
 | Phase 4：跨生态深度适配（Motion Photo ↔ Live Photo、折叠屏） | ⏳ 待开始 |
+
+### Phase 2.6 交付清单（本轮 UI 与系统集成）
+
+| 能力 | 入口 | 关键实现 |
+| --- | --- | --- |
+| Glimpse 风相册 UI | 主屏 | 大标题 + 计数徽章 + 日/月切换胶囊 + 8dp 圆角卡片 |
+| 日 / 月视图 | 顶部胶囊 | 月为骨架，`DayBucketing` 月内派生日分组；**始终单层 `LazyColumn`** |
+| 深浅色 + Monet | 设置 → 外观 | `ThemeMode` + `dynamicLight/DarkColorScheme`（Android 12+）|
+| 本地相册管理 | Albums Tab | `LocalAlbumRepository` 读 MediaStore，双/三列卡片 |
+| 系统云端媒体源 | 设置 → 系统整合 | `ICloudMediaProvider` + Shizuku 一键激活白名单 |
+
+> [!WARNING]
+> **PhotoPicker 宫格缩略图仍有少量空白残留**（快速上滑进入早期年份时）。
+> provider 侧已 100% 成功返回完整 JPEG，剩余问题在系统侧的解码/缓存时序。
+> 详细柹障记录与待查方向见 [ISS-035](CHANGELOG_ISSUES.md#iss-035photopicker-缩略图空白多层柹障式修复与已知残留)。
 
 ### Phase 2.5 交付清单（本轮）
 

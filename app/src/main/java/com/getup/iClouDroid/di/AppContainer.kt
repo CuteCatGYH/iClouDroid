@@ -37,7 +37,7 @@ class AppContainer(private val appContext: Context) {
     /** App context, for the schedulers that need it without holding an Activity. */
     val context: Context get() = appContext
 
-    private val photoDatabase: PhotoDatabase by lazy {
+    val photoDatabase: PhotoDatabase by lazy {
         PhotoDatabase.getInstance(appContext)
     }
 
@@ -54,6 +54,10 @@ class AppContainer(private val appContext: Context) {
      */
     val monthScanEngine: MonthScanEngine by lazy {
         MonthScanEngine(photoDatabase, photoRepository)
+    }
+
+    val localAlbumRepository: com.getup.iClouDroid.feature.local.data.LocalAlbumRepository by lazy {
+        com.getup.iClouDroid.feature.local.data.LocalAlbumRepository(appContext)
     }
 
     // Future features plug in here:

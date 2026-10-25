@@ -617,3 +617,65 @@ Modifier.graphicsLayer { translationX = p * travelPx; alpha = 1f - p * 0.6f }
 两个 handler 都要**提前注册**，且注册位置要能访问到控制显隐的那个状态。
 本项目把设置页包成 `SettingsContainer`，就是为了让 `BackHandler` 和 `settingsOpen`
 处于同一个作用域，而不是从子组件往上抬回调。
+
+---
+
+## 21. 系统云端媒体提供方：代码全对但界面空白
+
+这一类问题在 `feature/photos` 里永远遇不到，因为**失败发生在别的进程**。
+
+### 21.1 平台级集成先查白名单，别急着改代码
+
+Android 大量“平台级集成”都带 OEM / 服务端白名单。云端媒体提供方就是典型：
+
+```
+DeviceConfig: mediaprovider / storage_native_boot → allowed_cloud_providers
+```
+
+**症状**：Manifest 完全合规、`Provider Resolver Table` 能看到、
+`get_cloud_provider` 也返回我们的 authority，但系统设置列表里就是没有。
+
+先查这个，再改代码：
+
+```bash
+dumpsys activity provider .../MediaProvider | grep allowedCloudProviderPackages
+```
+
+### 21.2 日志要看“对方进程”的
+
+自己的 provider 日志显示：
+
+```
+openPreview OK bytes=83966 elapsed=1ms    ← 完全正常
+```
+
+而屏幕依旧空白。真正的失败在 PhotoPicker 进程里：
+
+```
+RuntimeException: setDataSource failed: status = 0xFFFFFFEA
+    at com.bumptech.glide.load.resource.bitmap.VideoDecoder.decode
+```
+
+**教训：只要“看到了图但看不到缩略图”，就去 grep 对方进程的 Glide tag，
+而不是只盯着自己进程的成功日志。**
+
+### 21.3 取消 ≠ 失败，也不能等用户“下次再来”
+
+实测：PhotoPicker 对宫格格子**只请求一次**。
+
+| 朴素假设 | 实测真相 |
+| --- | --- |
+| 失败后会重试 | 宫格不会（除非行被回收后又滚回来）|
+| `CancellationSignal` 触发就该停手 | 停了就永久空白，**已下字节也不该删** |
+| 超时返回 null 比阻塞好 | 空白格比等 1 秒严重得多 |
+
+### 21.4 MIME 描述的是“你返回的字节”，不是“原始媒体”
+
+这条与官方文档字面相反，以实测为准。详见
+[AGENTS §6.7.3](AGENTS.md#673-mime-必须描述onopenpreview-返回的字节)。
+
+### 21.5 元数据修正必须 bump 版本号
+
+系统按 `LAST_MEDIA_SYNC_GENERATION` 缓存行，值不变就**不重新查询**。
+改了列取值规则却不 bump，已安装设备永远看到旧数据（开发机上看不到，因为 `pm clear` 过）。
+

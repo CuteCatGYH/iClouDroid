@@ -11,6 +11,7 @@ import androidx.work.WorkManager
 import com.getup.iClouDroid.data.settings.AppSettings
 import com.getup.iClouDroid.data.settings.ScanCadence
 import com.getup.iClouDroid.data.settings.ScanFrequency
+import androidx.work.workDataOf
 import java.util.concurrent.TimeUnit
 
 /**
@@ -53,6 +54,7 @@ object PeriodicScanScheduler {
         val initialDelay = ScanCadence.delayUntilPreferredHour(System.currentTimeMillis())
 
         val request = PeriodicWorkRequestBuilder<MonthScanWorker>(periodMillis, TimeUnit.MILLISECONDS)
+            .setInputData(workDataOf("force" to true))
             .setConstraints(
                 Constraints.Builder()
                     .setRequiredNetworkType(NetworkType.CONNECTED)

@@ -4,6 +4,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Note
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Photo
+import androidx.compose.material.icons.filled.PhotoAlbum
 import androidx.compose.ui.graphics.vector.ImageVector
 
 /**
@@ -16,7 +17,8 @@ enum class AppDestination(
     val label: String,
     val icon: ImageVector
 ) {
-    Photos("照片", Icons.Default.Photo),
+    Photos("Photo", Icons.Default.Photo),
+    Albums("Albums", Icons.Default.PhotoAlbum),
     Drive("Drive", Icons.Default.Folder),
     Notes("备忘录", Icons.AutoMirrored.Filled.Note)
 }

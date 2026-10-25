@@ -13,6 +13,7 @@ import com.getup.iClouDroid.feature.photos.data.MonthScanEngine
 import com.getup.iClouDroid.feature.photos.data.ScanProgress
 import com.getup.iClouDroid.feature.photos.data.db.PhotoAssetEntity
 import com.getup.iClouDroid.feature.photos.data.db.PhotoMonthIndexEntity
+import com.getup.iClouDroid.feature.photos.work.ScanNotificationHelper
 import com.getup.iClouDroid.feature.photos.work.ScanScheduler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -82,6 +83,13 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
         .map { GalleryUiState(months = it) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), GalleryUiState())
 
+    val galleryViewMode: StateFlow<com.getup.iClouDroid.data.settings.GalleryViewMode> =
+        container.appSettings.galleryViewMode
+
+    fun setGalleryViewMode(mode: com.getup.iClouDroid.data.settings.GalleryViewMode) {
+        container.appSettings.setGalleryViewMode(mode)
+    }
+
     private val _gridColumns = MutableStateFlow(4)
     val gridColumns: StateFlow<Int> = _gridColumns.asStateFlow()
 
@@ -136,6 +144,9 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
             // Restore the persisted estimate first so the progress bar has a denominator even
             // before this run produces any progress of its own.
             scanEngine.restoreProgress()
+            if (!scanEngine.progress.value.isScanning) {
+                ScanNotificationHelper.cancel(getApplication())
+            }
 
             // Bucket any rows left over from a v3→v4 upgrade (or an interrupted scan) before the
             // UI reads the index. Without this an upgraded install shows a populated count but an
@@ -192,6 +203,18 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
      */
     private val _monthPhotos = MutableStateFlow<Map<Int, List<PhotoAssetEntity>>>(emptyMap())
     val monthPhotos: StateFlow<Map<Int, List<PhotoAssetEntity>>> = _monthPhotos.asStateFlow()
+
+    /**
+     * Day-level groupings per month, memoized for the Day View.
+     */
+    val monthDaysMap: StateFlow<Map<Int, List<com.getup.iClouDroid.feature.photos.data.DayBucketing.DayGroup>>> =
+        _monthPhotos
+            .map { map ->
+                map.mapValues { (_, photos) ->
+                    com.getup.iClouDroid.feature.photos.data.DayBucketing.groupPhotosByDay(photos)
+                }
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     private val monthJobs = mutableMapOf<Int, Job>()
 
@@ -430,7 +453,7 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
                     }
                 }
 
-                val result = scanEngine.scanAll()
+                val result = scanEngine.scanAll(force = true)
                 progressJob.cancel()
 
                 if (result.isSuccess) {
@@ -443,6 +466,7 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
                 } else {
                     _syncMessage.value = "扫描失败: ${result.exceptionOrNull()?.message}"
                 }
+                ScanNotificationHelper.cancel(getApplication())
             } catch (e: Exception) {
                 Log.e(TAG, "startFullScan exception", e)
                 _syncMessage.value = "异常: ${e.message}"

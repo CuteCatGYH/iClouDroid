@@ -9,6 +9,8 @@ import androidx.lifecycle.viewModelScope
 import com.getup.iClouDroid.IClouDroidApp
 import com.getup.iClouDroid.data.session.SessionManager
 import com.getup.iClouDroid.feature.photos.data.image.ICloudImageLoaderFactory
+import com.getup.iClouDroid.feature.photos.work.PeriodicScanScheduler
+import com.getup.iClouDroid.feature.photos.work.ScanNotificationHelper
 import com.getup.iClouDroid.feature.photos.work.ScanScheduler
 import com.getup.icloudcore.Icloudcore
 import kotlinx.coroutines.Dispatchers
@@ -361,8 +363,11 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
             // resurrect deleted rows and leave an un-dismissable progress notification stranded
             // on the login screen. Cancelling here is part of the "block before you clean" rule
             // that beginWipe() enforces for the network paths.
-            runCatching { ScanScheduler.cancel(getApplication<Application>()) }
-                .onFailure { Log.w(AUTH_LOG_TAG, "Failed to cancel scan worker: ${it.message}") }
+            runCatching {
+                ScanScheduler.cancel(getApplication<Application>())
+                PeriodicScanScheduler.cancel(getApplication<Application>())
+                ScanNotificationHelper.cancel(getApplication<Application>())
+            }.onFailure { Log.w(AUTH_LOG_TAG, "Failed to cancel scan worker: ${it.message}") }
 
             // 1. Block new network work and stop the paging pipeline.
             repository.beginWipe()

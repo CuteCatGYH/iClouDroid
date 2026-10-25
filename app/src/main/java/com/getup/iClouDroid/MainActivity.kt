@@ -34,6 +34,7 @@ class MainActivity : ComponentActivity() {
 
     private val authViewModel: AuthViewModel by viewModels()
     private val photosViewModel: PhotosViewModel by viewModels()
+    private val localAlbumsViewModel: com.getup.iClouDroid.feature.local.ui.LocalAlbumsViewModel by viewModels()
 
     /**
      * Asks for POST_NOTIFICATIONS once (Android 13+), so the background scan can show its
@@ -51,8 +52,17 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         requestNotificationPermissionIfNeeded()
+        val container = (applicationContext as IClouDroidApp).container
+        val appSettings = container.appSettings
+
         setContent {
-            MaterialTheme {
+            val themeMode by appSettings.themeMode.collectAsState()
+            val useDynamicColor by appSettings.useDynamicColor.collectAsState()
+
+            com.getup.iClouDroid.ui.theme.IClouDroidTheme(
+                themeMode = themeMode,
+                dynamicColor = useDynamicColor
+            ) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
@@ -82,6 +92,7 @@ class MainActivity : ComponentActivity() {
                             // to the shell, which owns section switching (photos / drive / notes).
                             AppShell(
                                 photosViewModel = photosViewModel,
+                                localAlbumsViewModel = localAlbumsViewModel,
                                 openSettings = openSettings,
                                 onOpenSettingsHandled = { openSettings = false },
                                 onOpenAccountInfo = { showAccountDialog = true }

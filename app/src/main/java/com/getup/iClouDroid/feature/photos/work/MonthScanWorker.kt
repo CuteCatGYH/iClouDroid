@@ -10,7 +10,9 @@ import androidx.work.WorkerParameters
 import com.getup.iClouDroid.IClouDroidApp
 import com.getup.iClouDroid.feature.photos.data.MonthScanEngine
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.flow.collectLatest
+import android.app.NotificationManager
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 
 /**
  * Keeps the month scan running while the app is in the background (P2-016).
@@ -34,7 +36,7 @@ class MonthScanWorker(
     params: WorkerParameters
 ) : CoroutineWorker(appContext, params) {
 
-    override suspend fun doWork(): Result {
+    override suspend fun doWork(): Result = coroutineScope {
         val container = (applicationContext as IClouDroidApp).container
         val engine = container.monthScanEngine
 
@@ -42,16 +44,56 @@ class MonthScanWorker(
         // resurrect rows the teardown is deleting (P2-018).
         if (container.photoRepository.isWipeInProgress()) {
             Log.d(TAG, "Scan worker skipped - logout teardown in progress")
-            return Result.success()
+            return@coroutineScope Result.success()
         }
 
-        return try {
-            setForeground(createForegroundInfo(engine))
-            observeProgress(engine)
+        // Collect progress concurrently while scanAll runs.
+        val progressJob = launch {
+            try {
+                engine.progress.collect { progress ->
+                    if (progress.isScanning) {
+                        try {
+                            setForeground(
+                                ForegroundInfo(
+                                    ScanNotificationHelper.NOTIFICATION_ID,
+                                    ScanNotificationHelper.buildOngoing(applicationContext, progress),
+                                    foregroundServiceType()
+                                )
+                            )
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed to update foreground info: ${e.message}")
+                        }
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Progress notification collector threw: ${e.message}")
+            }
+        }
 
-            val result = engine.scanAll()
+        try {
+            setForeground(createForegroundInfo(engine))
+
+            val force = inputData.getBoolean("force", false)
+            val result = engine.scanAll(force = force)
+
+            progressJob.cancel()
+
             if (result.isSuccess) {
-                Log.i(TAG, "Background scan finished, scanned=${engine.progress.value.scanned}")
+                val scanned = engine.progress.value.scanned
+                Log.i(TAG, "Background scan finished, scanned=$scanned")
+
+                if (scanned > 0) {
+                    val manager = applicationContext.getSystemService(NotificationManager::class.java)
+                    manager?.notify(
+                        ScanNotificationHelper.NOTIFICATION_ID,
+                        ScanNotificationHelper.buildFinished(applicationContext, scanned)
+                    )
+                } else {
+                    ScanNotificationHelper.cancel(applicationContext)
+                }
+
                 Result.success()
             } else if (runAttemptCount < MAX_ATTEMPTS) {
                 Log.w(TAG, "Background scan failed, will retry (attempt $runAttemptCount)")
@@ -61,33 +103,12 @@ class MonthScanWorker(
                 Result.failure()
             }
         } catch (e: CancellationException) {
-            // Cancelled (user cancelled, or the system stopped the foreground service). The
-            // cursor is persisted, so the next run resumes.
+            progressJob.cancel()
             throw e
         } catch (e: Exception) {
+            progressJob.cancel()
             Log.e(TAG, "Background scan threw", e)
             if (runAttemptCount < MAX_ATTEMPTS) Result.retry() else Result.failure()
-        }
-    }
-
-    /** Keeps the notification text in step with the engine's progress. */
-    private suspend fun observeProgress(engine: MonthScanEngine) {
-        try {
-            engine.progress.collectLatest { progress ->
-                if (!progress.isScanning) return@collectLatest
-                setForeground(
-                    ForegroundInfo(
-                        ScanNotificationHelper.NOTIFICATION_ID,
-                        ScanNotificationHelper.buildOngoing(applicationContext, progress),
-                        foregroundServiceType()
-                    )
-                )
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            // Notification updates are cosmetic; never let one fail the scan.
-            Log.w(TAG, "Progress notification update failed: ${e.message}")
         }
     }
 

@@ -41,6 +41,88 @@ interface PhotoDao {
     suspend fun getAllIdentities(): List<PhotoIdentity>
 
     /**
+     * First page for the system photo picker's cloud sync.
+     *
+     * ## Why keyset and not OFFSET (ISS-035)
+     *
+     * `photo_assets` is not frozen while the picker is open: incremental sync, the month scanner
+     * and the periodic worker all `upsertAll` / `deleteByIds` on it. `LIMIT n OFFSET m` anchors on
+     * a *row number*, so a single inserted or deleted row shifts every later page by one — one row
+     * gets skipped (a photo that never appears) and one gets duplicated (the picker drops it as a
+     * duplicate `ID`). The picker walks the whole library in pages, so the drift accumulates and is
+     * worst exactly where the user notices it: the last pages, i.e. the earliest years.
+     *
+     * Keyset pagination anchors on `(assetDate, id)` *values* instead, so it is immune to any
+     * insert or delete. It also still matches the `(isHidden, assetDate, id)` index.
+     *
+     * Ordered exactly like [observeMonth] so the picker's incremental sync sees a stable sequence.
+     */
+    @Query(
+        """
+        SELECT * FROM photo_assets
+        WHERE isHidden = 0
+        ORDER BY assetDate DESC, id ASC
+        LIMIT :limit
+        """
+    )
+    suspend fun getMediaPageFirst(limit: Int): List<PhotoAssetEntity>
+
+    /**
+     * Next page after the `(lastDate, lastId)` cursor handed out by the previous page.
+     *
+     * The `id > :lastId` arm is the tiebreaker for the many rows that share one second — without
+     * it the page boundary would be non-deterministic and rows could repeat or vanish.
+     */
+    @Query(
+        """
+        SELECT * FROM photo_assets
+        WHERE isHidden = 0
+          AND (assetDate < :lastDate OR (assetDate = :lastDate AND id > :lastId))
+        ORDER BY assetDate DESC, id ASC
+        LIMIT :limit
+        """
+    )
+    suspend fun getMediaPageAfter(
+        limit: Int,
+        lastDate: Long,
+        lastId: String
+    ): List<PhotoAssetEntity>
+
+    /**
+     * Legacy OFFSET page, kept only so a picker holding a pre-keyset token keeps working.
+     *
+     * `ICloudMediaProvider` encodes the cursor as `"<assetDate>:<id>"`; a bare integer token can
+     * only have come from the previous (offset-based) release, because the picker persists page
+     * tokens across provider restarts. It is subject to the drift described on [getMediaPageFirst],
+     * so it is used for at most one page and never emitted again.
+     */
+    @Query(
+        """
+        SELECT * FROM photo_assets
+        WHERE isHidden = 0
+        ORDER BY assetDate DESC, id ASC
+        LIMIT :limit OFFSET :offset
+        """
+    )
+    suspend fun getMediaPage(limit: Int, offset: Int): List<PhotoAssetEntity>
+
+    /**
+     * Ids of assets whose stored URL is older than [olderThan], newest first.
+     *
+     * Used by the system photo picker to renew a whole page of URLs up-front, instead of paying
+     * one `/records/lookup` per tile on its first scroll.
+     */
+    @Query(
+        """
+        SELECT id, masterId FROM photo_assets
+        WHERE isHidden = 0 AND urlFetchedAt < :olderThan
+        ORDER BY assetDate DESC, id ASC
+        LIMIT :limit
+        """
+    )
+    suspend fun getStaleUrlAssetIds(olderThan: Long, limit: Int): List<PhotoIdentity>
+
+    /**
      * Deletes only exact asset ids.
      *
      * Distinct from [deleteByIds], which also matches `masterId` and is used when CloudKit has told

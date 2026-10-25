@@ -1,5 +1,8 @@
 package com.getup.iClouDroid.ui.settings
 
+import android.content.Intent
+import android.os.Build
+import android.provider.MediaStore
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -15,10 +18,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -28,10 +34,12 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -39,24 +47,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.getup.iClouDroid.data.settings.AppSettings
-import com.getup.iClouDroid.data.settings.ScanFrequency
 import com.getup.iClouDroid.data.settings.ScanCadence
+import com.getup.iClouDroid.data.settings.ScanFrequency
+import com.getup.iClouDroid.ui.theme.ThemeMode
 
 /**
  * Settings, reachable from the account sheet.
- *
- * ## Adding a setting
- *
- * 1. Add an entry to [SettingsItem].
- * 2. Add it to a group in [SettingsCatalog.groups].
- * 3. Add one branch in [SettingsRow] and, if it needs state, one property in the ViewModel.
- *
- * Nothing else needs to change: the screen builds itself from the catalog, so groups, dividers and
- * ordering are automatic.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -74,6 +75,8 @@ fun SettingsScreen(
 ) {
     val frequency by settings.scanFrequency.collectAsStateWithLifecycle()
     val customDays by settings.customIntervalDays.collectAsStateWithLifecycle()
+    val themeMode by settings.themeMode.collectAsStateWithLifecycle()
+    val useDynamicColor by settings.useDynamicColor.collectAsStateWithLifecycle()
 
     var showScanWarning by remember { mutableStateOf(false) }
 
@@ -95,9 +98,9 @@ fun SettingsScreen(
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                    navigationIconContentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface,
+                    navigationIconContentColor = MaterialTheme.colorScheme.onSurface
                 )
             )
         }
@@ -118,94 +121,112 @@ fun SettingsScreen(
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(top = 16.dp, bottom = 6.dp)
+                    modifier = Modifier.padding(start = 4.dp, top = 16.dp, bottom = 4.dp)
                 )
-                group.description?.let {
+
+                if (group.description != null) {
                     Text(
-                        text = it,
+                        text = group.description,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(bottom = 10.dp)
+                        modifier = Modifier.padding(start = 4.dp, bottom = 8.dp)
                     )
                 }
 
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    group.items.forEachIndexed { index, item ->
-                        if (index > 0) {
-                            HorizontalDivider(
-                                modifier = Modifier.padding(start = 16.dp),
-                                color = MaterialTheme.colorScheme.outlineVariant
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                ) {
+                    Column {
+                        group.items.forEachIndexed { index, item ->
+                            if (index > 0) {
+                                HorizontalDivider(
+                                    modifier = Modifier.padding(horizontal = 16.dp),
+                                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                                )
+                            }
+                            SettingsRow(
+                                item = item,
+                                settings = settings,
+                                themeMode = themeMode,
+                                useDynamicColor = useDynamicColor,
+                                frequency = frequency,
+                                customDays = customDays,
+                                isFullScanRunning = isFullScanRunning,
+                                onRequestFullScan = { showScanWarning = true },
+                                onFrequencyChanged = onFrequencyChanged,
+                                onCustomIntervalChanged = onCustomIntervalChanged
                             )
                         }
-                        SettingsRow(
-                            item = item,
-                            frequency = frequency,
-                            customDays = customDays,
-                            isFullScanRunning = isFullScanRunning,
-                            onRequestFullScan = { showScanWarning = true },
-                            onFrequencyChanged = onFrequencyChanged,
-                            onCustomIntervalChanged = onCustomIntervalChanged
-                        )
                     }
                 }
             }
 
-            if (frequency != ScanFrequency.OFF) {
-                Spacer(Modifier.height(12.dp))
-                Text(
-                    text = "下次自动扫描将在凌晨 " +
-                        "${ScanCadence.PREFERRED_HOUR}:00 左右开始（系统可能因省电策略略有延迟）。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            fullScanMessage?.let {
-                Spacer(Modifier.height(12.dp))
-                Text(
-                    text = it,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary
-                )
+            if (fullScanMessage != null) {
+                Spacer(Modifier.height(16.dp))
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
+                ) {
+                    Text(
+                        text = fullScanMessage,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.padding(14.dp)
+                    )
+                }
             }
 
             Spacer(Modifier.height(32.dp))
         }
-    }
 
-    if (showScanWarning) {
-        FullScanWarningDialog(
-            onDismiss = { showScanWarning = false },
-            onConfirm = {
-                showScanWarning = false
-                onStartFullScan()
-            }
-        )
+        if (showScanWarning) {
+            FullScanWarningDialog(
+                frequency = frequency,
+                customDays = customDays,
+                onConfirm = {
+                    showScanWarning = false
+                    onStartFullScan()
+                },
+                onDismiss = { showScanWarning = false }
+            )
+        }
     }
 }
 
-/**
- * Explains what a full scan is about to do, and why it must not be interrupted.
- *
- * The warning is not ceremony: the walk runs hundreds of sequential CloudKit requests, and killing
- * the app mid-way does not lose data — but it does mean the reconciliation is skipped for that
- * round, so photos deleted elsewhere keep showing up until the next complete run.
- */
 @Composable
-private fun FullScanWarningDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
+private fun FullScanWarningDialog(
+    frequency: ScanFrequency,
+    customDays: Int,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("开始全盘扫描？") },
         text = {
             Column {
-                Text("全盘扫描会重新遍历整个 iCloud 照片库，可能需要几分钟。")
-                Spacer(Modifier.height(8.dp))
                 Text(
-                    "扫描过程中请不要强行关闭 App：中断后本次扫描不会生效，" +
-                        "已删除的照片暂时仍会显示，需要等下一次完整扫描才会被清理。",
-                    fontWeight = FontWeight.Medium
+                    "全盘扫描会完整遍历云端照片库（发起数百次请求），并比对本地数据库以清理在其它设备上已删除的照片。"
                 )
                 Spacer(Modifier.height(8.dp))
+                if (frequency != ScanFrequency.OFF) {
+                    val cadenceDesc = when (frequency) {
+                        ScanFrequency.DAILY -> "每天"
+                        ScanFrequency.WEEKLY -> "每周"
+                        ScanFrequency.MONTHLY -> "每月"
+                        ScanFrequency.CUSTOM -> "每 $customDays 天"
+                        ScanFrequency.OFF -> ""
+                    }
+                    Text(
+                        "后台扫描已开启（$cadenceDesc 凌晨 3:00 自动执行），通常无需手动触发。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
                 Text(
                     "扫到一半退出不会损坏任何数据，下次会从断点继续。",
                     style = MaterialTheme.typography.bodySmall,
@@ -221,6 +242,9 @@ private fun FullScanWarningDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) 
 @Composable
 private fun SettingsRow(
     item: SettingsItem,
+    settings: AppSettings,
+    themeMode: ThemeMode,
+    useDynamicColor: Boolean,
     frequency: ScanFrequency,
     customDays: Int,
     isFullScanRunning: Boolean,
@@ -228,7 +252,88 @@ private fun SettingsRow(
     onFrequencyChanged: (ScanFrequency) -> Unit,
     onCustomIntervalChanged: (Int) -> Unit
 ) {
+    val context = LocalContext.current
+
     when (item) {
+        SettingsItem.THEME_MODE -> DropdownRow(
+            title = "主题外观",
+            subtitle = "切换应用深色、浅色或跟随系统",
+            current = themeMode.label,
+            options = ThemeMode.entries.map { it to it.label },
+            onSelect = { settings.setThemeMode(it) }
+        )
+
+        SettingsItem.DYNAMIC_COLOR -> {
+            val supported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Monet 动态色彩",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = if (supported) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                    )
+                    Text(
+                        text = if (supported) "从系统壁纸提取主色调 (Android 12+)" else "当前系统版本不支持",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Switch(
+                    checked = useDynamicColor && supported,
+                    enabled = supported,
+                    onCheckedChange = { settings.setUseDynamicColor(it) }
+                )
+            }
+        }
+
+        SettingsItem.CLOUD_MEDIA_PROVIDER -> {
+            var showShizukuDialog by remember { mutableStateOf(false) }
+
+            ActionRow(
+                title = "云端媒体提供方",
+                subtitle = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    "通过 Shizuku 一键激活或前往系统设置"
+                } else {
+                    "需要 Android 13 (API 33) 及以上系统支持"
+                },
+                enabled = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU,
+                trailing = {
+                    Icon(
+                        Icons.AutoMirrored.Filled.OpenInNew,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                },
+                onClick = {
+                    showShizukuDialog = true
+                }
+            )
+
+            if (showShizukuDialog) {
+                CloudMediaActivationDialog(
+                    onDismiss = { showShizukuDialog = false },
+                    onOpenSystemSettings = {
+                        showShizukuDialog = false
+                        try {
+                            val intent = Intent(MediaStore.ACTION_PICK_IMAGES_SETTINGS)
+                            context.startActivity(intent)
+                        } catch (e: Exception) {
+                            val intent = Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                data = android.net.Uri.parse("package:${context.packageName}")
+                            }
+                            context.startActivity(intent)
+                        }
+                    }
+                )
+            }
+        }
+
         SettingsItem.FULL_SCAN -> ActionRow(
             title = "全盘扫描照片库",
             subtitle = if (isFullScanRunning) "正在扫描…" else "清理在其它设备上已删除的照片",
@@ -255,7 +360,7 @@ private fun SettingsRow(
         )
 
         SettingsItem.CUSTOM_INTERVAL -> DropdownRow(
-            title = "自定义周期",
+            title = "自定义��期",
             subtitle = if (frequency == ScanFrequency.CUSTOM) {
                 "每 $customDays 天执行一次"
             } else {
@@ -288,7 +393,11 @@ private fun ActionRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(modifier = Modifier.weight(1f)) {
-            Text(text = title, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyLarge,
+                color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+            )
             Text(
                 text = subtitle,
                 style = MaterialTheme.typography.bodySmall,
@@ -362,4 +471,109 @@ private fun <T> DropdownRow(
             }
         }
     }
+}
+
+@Composable
+private fun CloudMediaActivationDialog(
+    onDismiss: () -> Unit,
+    onOpenSystemSettings: () -> Unit
+) {
+    val context = LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+
+    var isActivating by remember { mutableStateOf(false) }
+    var activationStatus by remember { mutableStateOf<String?>(null) }
+    val isShizukuRunning = com.getup.iClouDroid.provider.ShizukuMediaHelper.isShizukuAvailable()
+    val hasPermission = com.getup.iClouDroid.provider.ShizukuMediaHelper.hasShizukuPermission()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("系统云端媒体设置") },
+        text = {
+            Column {
+                Text(
+                    text = "Android 系统对云端媒体提供方开启了白名单保护。您可以通过以下方式之一完成激活：",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Spacer(Modifier.height(12.dp))
+
+                if (isShizukuRunning) {
+                    Text(
+                        text = if (hasPermission) "✅ Shizuku 已连接并授权" else "⚠️ Shizuku 已运行，点击可请求授权",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                } else {
+                    Text(
+                        text = "ℹ️ 未检测到 Shizuku 运行。您也可通过电脑执行 ADB 命令完成激活。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                if (activationStatus != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = activationStatus ?: "",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                // Copy ADB command
+                TextButton(
+                    onClick = {
+                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        val clip = android.content.ClipData.newPlainText("ADB Command", com.getup.iClouDroid.provider.ShizukuMediaHelper.ADB_COMMAND)
+                        clipboard.setPrimaryClip(clip)
+                        android.widget.Toast.makeText(context, "已复制 ADB 命令到剪贴板", android.widget.Toast.LENGTH_SHORT).show()
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("复制电脑端 ADB 激活命令")
+                }
+            }
+        },
+        confirmButton = {
+            if (isShizukuRunning) {
+                Button(
+                    enabled = !isActivating,
+                    onClick = {
+                        if (!hasPermission) {
+                            com.getup.iClouDroid.provider.ShizukuMediaHelper.requestShizukuPermission()
+                        } else {
+                            isActivating = true
+                            activationStatus = "正在写入系统配置..."
+                            scope.launch {
+                                val result = com.getup.iClouDroid.provider.ShizukuMediaHelper.executeActivation()
+                                isActivating = false
+                                activationStatus = result.fold(
+                                    onSuccess = { it },
+                                    onFailure = { "失败: ${it.message}" }
+                                )
+                            }
+                        }
+                    }
+                ) {
+                    if (isActivating) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    Text(if (!hasPermission) "请求 Shizuku 授权" else "通过 Shizuku 一键激活")
+                }
+            } else {
+                Button(onClick = onOpenSystemSettings) {
+                    Text("前往系统设置")
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("关闭")
+            }
+        }
+    )
 }

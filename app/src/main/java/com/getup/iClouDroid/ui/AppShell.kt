@@ -42,6 +42,7 @@ import com.getup.iClouDroid.ui.settings.SettingsContainer
 @Composable
 fun AppShell(
     photosViewModel: PhotosViewModel,
+    localAlbumsViewModel: com.getup.iClouDroid.feature.local.ui.LocalAlbumsViewModel,
     onOpenAccountInfo: () -> Unit,
     modifier: Modifier = Modifier,
     openSettings: Boolean = false,
@@ -101,6 +102,12 @@ fun AppShell(
                     onViewerOpenChange = { viewerOpen = it },
                     contentPadding = PaddingValues(bottom = navBarPadding)
                 )
+                AppDestination.Albums -> {
+                    com.getup.iClouDroid.feature.local.ui.LocalAlbumsScreen(
+                        viewModel = localAlbumsViewModel,
+                        contentPadding = PaddingValues(bottom = navBarPadding)
+                    )
+                }
                 AppDestination.Drive -> PlaceholderScreen(AppDestination.Drive)
                 AppDestination.Notes -> PlaceholderScreen(AppDestination.Notes)
             }

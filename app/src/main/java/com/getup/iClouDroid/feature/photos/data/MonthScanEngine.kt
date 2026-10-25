@@ -95,7 +95,10 @@ class MonthScanEngine(
      *
      * @param batchSize records per `/records/query` call.
      */
-    suspend fun scanAll(batchSize: Int = DEFAULT_BATCH_SIZE): Result<Int> = withContext(Dispatchers.IO) {
+    suspend fun scanAll(
+        force: Boolean = false,
+        batchSize: Int = DEFAULT_BATCH_SIZE
+    ): Result<Int> = withContext(Dispatchers.IO) {
         if (!scanMutex.tryLock()) {
             // Another trigger owns the scan. Report its current state rather than starting over.
             Log.d(TAG, "scanAll skipped - a scan is already running")
@@ -130,7 +133,7 @@ class MonthScanEngine(
             backfillUnbucketedRows()
             rebuildMonthIndex()
 
-            if (state.isComplete && photoDao.countUnbucketed() == 0 && monthIndexDao.getAll().isNotEmpty()) {
+            if (!force && state.isComplete && photoDao.countUnbucketed() == 0 && monthIndexDao.getAll().isNotEmpty()) {
                 Log.d(TAG, "scanAll - library already fully scanned")
                 _progress.value = ScanProgress(
                     isScanning = false,
@@ -147,7 +150,17 @@ class MonthScanEngine(
             // pages, so clearing the table there leaves `seen` holding the tail of the library and
             // makes the reconcile pass delete everything the earlier pages covered. Measured cost
             // of getting this wrong: 700 legitimate photos purged after a mid-scan kill.
-            if (state.lastMarker == null) {
+            if (force) {
+                Log.i(TAG, "Forced full scan requested: resetting cursor and scan_seen_ids")
+                state = state.copy(
+                    lastMarker = null,
+                    isComplete = false,
+                    scannedCount = 0,
+                    updatedAt = System.currentTimeMillis()
+                )
+                scanStateDao.set(state)
+                repository.resetSeenIds()
+            } else if (state.lastMarker == null) {
                 repository.resetSeenIds()
             } else {
                 Log.d(TAG, "resuming walk - keeping earlier page ids in scan_seen_ids")

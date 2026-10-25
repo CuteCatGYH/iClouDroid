@@ -3,9 +3,18 @@ package com.getup.iClouDroid.data.settings
 import android.content.Context
 import android.content.SharedPreferences
 import androidx.core.content.edit
+import com.getup.iClouDroid.ui.theme.ThemeMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+
+/**
+ * View layout modes for the photo gallery.
+ */
+enum class GalleryViewMode(val label: String) {
+    DAY("日"),
+    MONTH("月")
+}
 
 /**
  * Schedule for the periodic full-library reconciliation walk.
@@ -46,6 +55,48 @@ class AppSettings(context: Context) {
         context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     // ---------------------------------------------------------------------------------------
+    // Appearance & Theme
+    // ---------------------------------------------------------------------------------------
+
+    private val _themeMode = MutableStateFlow(
+        ThemeMode.entries
+            .firstOrNull { it.name == prefs.getString(KEY_THEME_MODE, null) }
+            ?: ThemeMode.SYSTEM
+    )
+    val themeMode: StateFlow<ThemeMode> = _themeMode.asStateFlow()
+
+    fun setThemeMode(value: ThemeMode) {
+        prefs.edit { putString(KEY_THEME_MODE, value.name) }
+        _themeMode.value = value
+    }
+
+    private val _useDynamicColor = MutableStateFlow(
+        prefs.getBoolean(KEY_USE_DYNAMIC_COLOR, true)
+    )
+    val useDynamicColor: StateFlow<Boolean> = _useDynamicColor.asStateFlow()
+
+    fun setUseDynamicColor(value: Boolean) {
+        prefs.edit { putBoolean(KEY_USE_DYNAMIC_COLOR, value) }
+        _useDynamicColor.value = value
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Gallery View Mode (Day / Month)
+    // ---------------------------------------------------------------------------------------
+
+    private val _galleryViewMode = MutableStateFlow(
+        GalleryViewMode.entries
+            .firstOrNull { it.name == prefs.getString(KEY_GALLERY_VIEW_MODE, null) }
+            ?: GalleryViewMode.DAY
+    )
+    val galleryViewMode: StateFlow<GalleryViewMode> = _galleryViewMode.asStateFlow()
+
+    fun setGalleryViewMode(value: GalleryViewMode) {
+        prefs.edit { putString(KEY_GALLERY_VIEW_MODE, value.name) }
+        _galleryViewMode.value = value
+    }
+
+    // ---------------------------------------------------------------------------------------
     // Periodic full scan
     // ---------------------------------------------------------------------------------------
 
@@ -79,6 +130,9 @@ class AppSettings(context: Context) {
 
     companion object {
         private const val PREFS_NAME = "icloud_droid_settings"
+        private const val KEY_THEME_MODE = "theme_mode"
+        private const val KEY_USE_DYNAMIC_COLOR = "use_dynamic_color"
+        private const val KEY_GALLERY_VIEW_MODE = "gallery_view_mode"
         private const val KEY_SCAN_FREQUENCY = "scan_frequency"
         private const val KEY_CUSTOM_INTERVAL_DAYS = "custom_interval_days"
 

@@ -9,6 +9,15 @@ package com.getup.iClouDroid.ui.settings
  * silently not rendered.
  */
 enum class SettingsItem {
+    /** Theme mode: Follow system / Light / Dark. */
+    THEME_MODE,
+
+    /** Material You Monet dynamic color from system wallpaper. */
+    DYNAMIC_COLOR,
+
+    /** Cloud media provider settings shortcut. */
+    CLOUD_MEDIA_PROVIDER,
+
     /** Long-running: walks the whole cloud library. Shows a warning before starting. */
     FULL_SCAN,
 
@@ -35,6 +44,16 @@ data class SettingsGroup(
 object SettingsCatalog {
 
     val groups: List<SettingsGroup> = listOf(
+        SettingsGroup(
+            title = "外观与个性化",
+            description = "设置应用的深浅主题模式与 Android 12+ Monet 动态壁纸取色效果。",
+            items = listOf(SettingsItem.THEME_MODE, SettingsItem.DYNAMIC_COLOR)
+        ),
+        SettingsGroup(
+            title = "系统整合",
+            description = "配置 iClouDroid 与 Android 系统的多媒体生态深度联动。",
+            items = listOf(SettingsItem.CLOUD_MEDIA_PROVIDER)
+        ),
         SettingsGroup(
             title = "照片库",
             description = "全盘扫描会遍历整个 iCloud 照片库，用于发现并清理在其它设备上已删除的照片。",

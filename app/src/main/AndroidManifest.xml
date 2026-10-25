@@ -5,12 +5,17 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- P2-016: the month scan keeps running while the app is backgrounded, which needs a
-         foreground service of type dataSync (Android 14+). POST_NOTIFICATIONS is required from
-         Android 13 to show the ongoing progress notification. -->
+    <!-- P2-016: foreground service permissions -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Local Media permissions -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+    <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
 
     <application
         android:name=".IClouDroidApp"
@@ -34,25 +39,21 @@
             </intent-filter>
         </activity>
 
-        <!--
-          P2-016: WorkManager's own foreground service must declare the dataSync type.
-
-          MonthScanWorker calls setForeground(...) with FOREGROUND_SERVICE_TYPE_DATA_SYNC, and
-          WorkManager forwards that to SystemForegroundService. Declaring the permission alone is
-          not enough — the service element itself has to allow the type, otherwise the system
-          throws at runtime:
-
-            IllegalArgumentException: foregroundServiceType 0x00000001 is not a subset of
-            foregroundServiceType attribute 0x00000000 in service element of manifest file
-
-          That crash only fires once the app is backgrounded AND the worker actually starts
-          foreground work, which is why it presented as "crashes after a while" rather than
-          "crashes on launch".
-        -->
         <service
             android:name="androidx.work.impl.foreground.SystemForegroundService"
             android:foregroundServiceType="dataSync"
             tools:node="merge" />
+
+        <!-- CloudMediaProvider for Android 13+ (API 33) -->
+        <provider
+            android:name=".provider.ICloudMediaProvider"
+            android:authorities="com.getup.iClouDroid.cloudmedia"
+            android:exported="true"
+            android:permission="com.android.providers.media.permission.MANAGE_CLOUD_MEDIA_PROVIDERS">
+            <intent-filter>
+                <action android:name="android.content.action.CLOUD_MEDIA_PROVIDER" />
+            </intent-filter>
+        </provider>
 
     </application>
 

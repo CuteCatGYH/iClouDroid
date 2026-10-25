@@ -79,6 +79,10 @@ dependencies {
     // WorkManager: keeps the month scan running while the app is backgrounded (P2-016).
     implementation(libs.androidx.work.runtime)
 
+    // Shizuku: enables shell-level execution to register and set system cloud media providers
+    implementation(libs.shizuku.api)
+    implementation(libs.shizuku.provider)
+
     // Extended Icons
     implementation(libs.androidx.compose.material.icons.extended)
 
