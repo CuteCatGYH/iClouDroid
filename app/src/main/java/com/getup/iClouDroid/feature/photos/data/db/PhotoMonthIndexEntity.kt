@@ -31,5 +31,21 @@ data class PhotoMonthIndexEntity(
      * A month that is not complete is still rendered; it simply may gain more photos later. When
      * the whole library scan finishes, every month it covers becomes complete.
      */
-    val isComplete: Boolean = false
+    val isComplete: Boolean = false,
+
+    /**
+     * `id` of the asset that represents this month in the jump card — the newest one
+     * (`assetDate DESC` first).
+     *
+     * Stores the record id **only, never a URL**: a `downloadURL` signature dies after ~15 minutes
+     * (AGENTS §4.4), so a stored URL would almost always be stale by the time the card renders.
+     * The UI resolves the id against `photo_assets` and then through Coil's
+     * `icloud_{recordName}_thumb` key, which the grid has usually already populated.
+     *
+     * Null means "no cover to show", for any of:
+     *  - the row predates schema v8 and has not been re-scanned yet,
+     *  - the month was scanned while the user had cover previews switched off,
+     *  - every asset in the month was hidden.
+     */
+    val coverAssetId: String? = null
 )

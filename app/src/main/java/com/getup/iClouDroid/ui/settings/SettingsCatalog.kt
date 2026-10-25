@@ -21,6 +21,14 @@ enum class SettingsItem {
     /** Long-running: walks the whole cloud library. Shows a warning before starting. */
     FULL_SCAN,
 
+    /**
+     * Whether the month jump panel shows a thumbnail per month.
+     *
+     * Turning it off also stops the scan from downloading any cover — this is not a display-only
+     * switch (see [com.getup.iClouDroid.data.settings.AppSettings.monthCoverEnabled]).
+     */
+    MONTH_COVER_PREVIEW,
+
     /** How often the full walk repeats in the background. */
     SCAN_FREQUENCY,
 
@@ -57,7 +65,7 @@ object SettingsCatalog {
         SettingsGroup(
             title = "照片库",
             description = "全盘扫描会遍历整个 iCloud 照片库，用于发现并清理在其它设备上已删除的照片。",
-            items = listOf(SettingsItem.FULL_SCAN)
+            items = listOf(SettingsItem.FULL_SCAN, SettingsItem.MONTH_COVER_PREVIEW)
         ),
         SettingsGroup(
             title = "自动扫描",

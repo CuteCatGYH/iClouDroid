@@ -90,6 +90,25 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
         container.appSettings.setGalleryViewMode(mode)
     }
 
+    /**
+     * Whether the jump card shows month cover thumbnails.
+     *
+     * Read by the UI to decide which of the two month grids to render. The *downloading* half of
+     * the same switch lives in [com.getup.iClouDroid.feature.photos.data.PhotoRepository]; both read
+     * this one preference so the two can never disagree.
+     */
+    val monthCoverEnabled: StateFlow<Boolean> = container.appSettings.monthCoverEnabled
+
+    /**
+     * Cover rows for one year, subscribed by the jump card while it is open.
+     *
+     * Returns an empty list flow when covers are switched off, so the card's collector has nothing
+     * to observe and the plain text grid is used instead.
+     */
+    fun coverRows(year: Int): Flow<List<com.getup.iClouDroid.feature.photos.data.db.MonthCoverRow>> =
+        if (monthCoverEnabled.value) repository.observeMonthCovers(year)
+        else kotlinx.coroutines.flow.flowOf(emptyList())
+
     private val _gridColumns = MutableStateFlow(4)
     val gridColumns: StateFlow<Int> = _gridColumns.asStateFlow()
 

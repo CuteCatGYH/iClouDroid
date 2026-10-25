@@ -33,7 +33,18 @@ data class ScanProgress(
     val scanned: Int = 0,
     val estimatedTotal: Int = 0,
     val currentYearMonth: Int = 0,
-    val isComplete: Boolean = false
+    val isComplete: Boolean = false,
+    /**
+     * True while the post-walk cover download pass is running.
+     *
+     * A separate flag rather than another `scanned` count because this stage has its own unit
+     * (months, ~200 of them) and its own denominator. The UI shows "正在缓存月份封面…" off this
+     * so the several minutes it can take is attributable to something visible instead of looking
+     * like the walk stalled at 100%.
+     *
+     * Always false when the user has cover previews switched off — that stage does not run at all.
+     */
+    val isCachingCovers: Boolean = false
 ) {
     /**
      * Fraction for the progress bar, or null when there is no denominator.
@@ -73,7 +84,15 @@ data class ScanProgress(
  */
 class MonthScanEngine(
     private val database: PhotoDatabase,
-    private val repository: PhotoRepository
+    private val repository: PhotoRepository,
+    /**
+     * Read only to decide whether the post-walk cover pass should run at all.
+     *
+     * The repository reads the same flag for its own halves; this one exists so the scan can skip
+     * the whole stage — including publishing [ScanProgress.isCachingCovers] — without asking the
+     * repository first and parsing a zero back out.
+     */
+    private val appSettings: com.getup.iClouDroid.data.settings.AppSettings
 ) {
     private val photoDao: PhotoDao = database.photoDao()
     private val monthIndexDao: PhotoMonthIndexDao = database.photoMonthIndexDao()
@@ -197,6 +216,13 @@ class MonthScanEngine(
                         "reconcile did not run: ${reconciled.exceptionOrNull()?.message}"
                     )
                 }
+
+                // Months can still be complete-but-coverless: reconciliation may have just
+                // dropped rows, and any month never touched since the v8 migration has a null
+                // `coverAssetId`. Sweeping the whole index here is what makes the jump card
+                // populated on an upgraded install without waiting for a re-scan.
+                refreshAllCoverIds()
+                prefetchCovers()
             } else {
                 Log.w(
                     TAG,
@@ -406,13 +432,19 @@ class MonthScanEngine(
             return
         }
         val walkFinished = scanStateDao.get(ScanStateEntity.KEY_MONTH_SCAN)?.isComplete == true
+
+        val existingCover = monthIndexDao.get(yearMonth)?.coverAssetId
+        val cover = existingCover
+            ?: if (appSettings.monthCoverEnabled.value) photoDao.newestInMonth(yearMonth)?.id else null
+
         monthIndexDao.upsert(
             PhotoMonthIndexEntity(
                 yearMonth = yearMonth,
                 itemCount = aggregate.itemCount,
                 firstAssetDate = aggregate.firstAssetDate ?: 0L,
                 lastAssetDate = aggregate.lastAssetDate ?: 0L,
-                isComplete = walkFinished
+                isComplete = walkFinished,
+                coverAssetId = cover
             )
         )
     }
@@ -441,6 +473,67 @@ class MonthScanEngine(
         val months = monthIndexDao.getAll()
         if (months.isEmpty()) return
         monthIndexDao.upsertAll(months.map { it.copy(isComplete = true) })
+    }
+
+    /**
+     * Backfills `coverAssetId` for every month that does not have one yet.
+     *
+     * ## Why a separate sweep from [refreshMonthIndex]
+     *
+     * [refreshMonthIndex] is called per batch during the walk, and runs far too often to also do a
+     * "newest asset in this month" lookup. More importantly, most of a library is *not* re-walked
+     * on a given run: a resumed walk or an incremental sync only touches recent months, so an
+     * upgraded install would keep null covers for years of history. This sweep runs once, after a
+     * completed walk, and only pays for months whose cover is genuinely missing.
+     *
+     * Cheap by construction: one indexed `ORDER BY assetDate DESC LIMIT 1` per coverless month, and
+     * after the first run that is zero months.
+     */
+    private suspend fun refreshAllCoverIds() {
+        if (!appSettings.monthCoverEnabled.value) {
+            Log.d(TAG, "cover sweep skipped - covers disabled")
+            return
+        }
+        val months = monthIndexDao.getAll()
+        val missing = months.filter { it.coverAssetId.isNullOrBlank() }
+        if (missing.isEmpty()) return
+
+        Log.i(TAG, "backfilling coverAssetId for ${missing.size}/${months.size} months")
+        var updated = 0
+        for (month in missing) {
+            val newest = runCatching { photoDao.newestInMonth(month.yearMonth) }.getOrNull()
+            if (newest == null) continue
+            monthIndexDao.upsert(month.copy(coverAssetId = newest.id))
+            updated++
+        }
+        Log.i(TAG, "cover sweep done - $updated months updated")
+    }
+
+    /**
+     * Downloads the month covers so the jump card opens already populated.
+     *
+     * Wraps [PhotoRepository.prefetchMonthCovers], which does the concurrency limiting and swallows
+     * per-image failures. The only job here is to publish [ScanProgress.isCachingCovers] so the UI
+     * can attribute the wait, and to guarantee the flag is cleared even if the pass throws.
+     */
+    private suspend fun prefetchCovers() {
+        if (!appSettings.monthCoverEnabled.value) return
+
+        val months = monthIndexDao.getAll().map { it.yearMonth }
+        if (months.isEmpty()) return
+
+        _progress.value = _progress.value.copy(isCachingCovers = true)
+        try {
+            val cached = repository.prefetchMonthCovers(months)
+            Log.i(TAG, "cover prefetch: $cached/${months.size} cached")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Never fail a scan over a cosmetic cache warm-up.
+            Log.w(TAG, "cover prefetch failed: ${e.message}")
+        } finally {
+            _progress.value = _progress.value.copy(isCachingCovers = false)
+        }
     }
 
     /**

@@ -45,7 +45,7 @@ fun ScanProgressBar(
     modifier: Modifier = Modifier
 ) {
     AnimatedVisibility(
-        visible = progress.isScanning,
+        visible = progress.isScanning || progress.isCachingCovers,
         enter = fadeIn(),
         exit = fadeOut(),
         modifier = modifier
@@ -64,7 +64,11 @@ fun ScanProgressBar(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    if (progress.estimatedTotal <= 0) {
+                    // The cover pass gets its own spinner and its own sentence. Left as the normal
+                    // progress line it would read as "3,847 / 3,847 项 · 100%" for several minutes,
+                    // which looks exactly like a hang.
+                    val indeterminate = progress.isCachingCovers || progress.estimatedTotal <= 0
+                    if (indeterminate) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(14.dp),
                             strokeWidth = 2.dp,
@@ -72,14 +76,18 @@ fun ScanProgressBar(
                         )
                     }
                     Text(
-                        text = progressText(progress),
+                        text = if (progress.isCachingCovers) {
+                            "正在缓存月份封面…"
+                        } else {
+                            progressText(progress)
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSecondaryContainer
                     )
                 }
 
                 val fraction = progress.fraction
-                if (fraction != null) {
+                if (fraction != null && !progress.isCachingCovers) {
                     LinearProgressIndicator(
                         progress = { fraction },
                         modifier = Modifier.fillMaxWidth(),

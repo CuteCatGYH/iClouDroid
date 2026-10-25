@@ -128,6 +128,36 @@ class AppSettings(context: Context) {
         _customIntervalDays.value = clamped
     }
 
+    // ---------------------------------------------------------------------------------------
+    // Month cover previews (jump panel)
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * Whether the gallery's jump card shows a thumbnail for each month.
+     *
+     * ## This is not a display-only switch
+     *
+     * It is the single source of truth for both halves of the feature, and all three consumers
+     * read it:
+     *
+     *  - `PhotoRepository.rebuildMonthIndexFor` — skips the `coverAssetId` backfill when off
+     *  - `PhotoRepository.prefetchMonthCovers` — returns immediately when off
+     *  - `MonthIndexBar` — falls back to the plain text grid when off
+     *
+     * Hiding the images while still downloading them would be the worst of both outcomes: the user
+     * would save neither disk space nor scan time. Anything added later that touches covers must
+     * consult this flag too.
+     */
+    private val _monthCoverEnabled = MutableStateFlow(
+        prefs.getBoolean(KEY_MONTH_COVER_ENABLED, true)
+    )
+    val monthCoverEnabled: StateFlow<Boolean> = _monthCoverEnabled.asStateFlow()
+
+    fun setMonthCoverEnabled(value: Boolean) {
+        prefs.edit { putBoolean(KEY_MONTH_COVER_ENABLED, value) }
+        _monthCoverEnabled.value = value
+    }
+
     companion object {
         private const val PREFS_NAME = "icloud_droid_settings"
         private const val KEY_THEME_MODE = "theme_mode"
@@ -135,6 +165,7 @@ class AppSettings(context: Context) {
         private const val KEY_GALLERY_VIEW_MODE = "gallery_view_mode"
         private const val KEY_SCAN_FREQUENCY = "scan_frequency"
         private const val KEY_CUSTOM_INTERVAL_DAYS = "custom_interval_days"
+        private const val KEY_MONTH_COVER_ENABLED = "month_cover_enabled"
 
         const val MIN_CUSTOM_DAYS = 1
         const val MAX_CUSTOM_DAYS = 365

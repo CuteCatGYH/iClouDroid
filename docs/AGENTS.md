@@ -334,12 +334,37 @@ Room 照片表与 Coil 缓存都以 `recordName` 为主键，而这些 ID 属于
 | 写入时机 | `parsePhotoItems` 内即时计算，不留 `0` |
 | `0` 的含义 | 「未分桶」，月查询选不到 → 表现为「有数据但看不见」 |
 | 索引表 | `photo_month_index`（派生数据，可随时重建） |
+| 封面 | `coverAssetId` —— 该月 `assetDate DESC` 首项，**只存 id 不存 URL**（签名 15 分钟就死） |
+| 封面开关 | `AppSettings.monthCoverEnabled` 同时管住**下载**与**渲染**，不是纯 UI 开关 |
 | 扫描状态 | `scan_state`（含游标，断点续扫） |
 | `isComplete` | **派生值**，每次从 `scan_state` 读取，不得由调用方传入 |
 
 > [!WARNING]
 > **判断「是否需要初始化扫描」不能看行数。** 升级安装有行但未分桶，
 > `count == 0` 为假、初始化被跳过。应判断「是否存在未分桶行」（`countUnbucketed()`）。
+
+> [!CAUTION]
+> **月份轻封面（`coverAssetId`）目前仍未修好：小窗里的月份格子可以点、也不置灰，但缩略图为空白。**
+> 详见 [list.md 待修复项](list.md#p2-020月份轻封面缩略图仍为空白)。以下两条是排查中已确认的**硬规则**，
+> 改任何与封面/Coil 相关的代码前必须先读：
+>
+> **① 必须显式传 `imageLoader`，否则用的是系统默认 loader。**
+> 本项目的 loader 带 `ICloudPhotoKeyer` + `ICloudPhotoInterceptor` + `ImageDecoderDecoder`，
+> 且带磁盘缓存。`AsyncImage(model = ...)` 不传 `imageLoader` 参数时会回退到 `Coil.imageLoader(context)`,
+> 那个单例**完全不知道** `ICloudImageModel` 是什么：没有 Keyer → 缓存 key 变成对象哈希，
+> 没有 Fetcher → 直接失败，而且**一行日志都不会打**（因为拦截器根本没被调用）。
+> 正确写法抄 [PhotoGridItem.kt](file:///Users/syh/iClouDroid/app/src/main/java/com/getup/iClouDroid/feature/photos/ui/PhotoGridItem.kt)：
+> `imageLoader = ICloudImageLoaderFactory.get(context, rememberAppContainer())`。
+>
+> **② 手写 `ImageLoader.Builder(context).build()` 默认没有磁盘缓存。**
+> Coil 只在通过 `Coil.imageLoader(context)` 单例构建时才自动装磁盘缓存。实测：没有显式
+> `.diskCache { }` 时，预热日志写 `108/108 cached`，而 `cache/image_cache` 新增 **0 个文件**；
+> 补上之后同样一次预热从 352K 涨到 6.4M。这条同时解释了 `clearCaches()` 为何曾是空操作
+> （退出登录后旧账号缩略图实际没被清掉）。
+>
+> **③ `MonthScanEngine.refreshMonthIndex` 必须保留 `coverAssetId`。**
+> 它每批都 `upsert(PhotoMonthIndexEntity(...))` 且没写 `coverAssetId`，等于每次扫描/冷启动回读
+> 都把已填好的封面重置为 `null`。任何 `photo_month_index` 的 upsert 都必须显式带上该列。
 
 ---
 
@@ -697,7 +722,10 @@ app/src/main/java/com/getup/iClouDroid/
 │       │   ├── PhotoExif.kt            # EXIF/GPS 模型 + JSON 解析（每一项可空 = 缺失即不渲染）
 │       │   ├── db/                     # PhotoAssetEntity(含 yearMonth/exifJson)、PhotoMonthIndexEntity、ScanStateEntity、Dao
 │       │   └── image/ICloudPhotoCoil.kt # Keyer 绑 recordName + 拦截器代际判定 + cacheOnly 旁路 + 失败重试
-│       ├── ui/                         # PhotosScreen(按月分组的 LazyColumn)、MonthRow、MonthHeader、MonthIndexBar、ScanProgressBar、PhotosViewModel
+│       ├── ui/                         # PhotosScreen(按月分组的 LazyColumn)、MonthRow、MonthHeader、ScanProgressBar、PhotosViewModel
+│       │   ├── MonthIndexBar.kt        # 右侧年月索引：胶囊 + 小窗（竖排年份列 + 3×4 封面月份网格）
+│       │   ├── MonthIndexModel.kt      # 索引面板纯逻辑（年份分组 / 步进 / 落点校验，有单测）
+│       │   ├── MonthCoverModel.kt      # 月份格子三态（Cover/Placeholder/Unavailable）纯逻辑，有单测
 │       │   ├── PhotoViewerScreen.kt    # 全屏查看器（HorizontalPager + 顶部/底部 chrome + 信息卡片）
 │       │   ├── PhotoViewerPages.kt     # ImageViewerPage(双层画质过渡/HDR 降级) / VideoViewerPage(窗口化 ExoPlayer)
 │       │   ├── PhotoInfoCard.kt        # EXIF 卡片，按字段存在性逐级降级，永不空白
