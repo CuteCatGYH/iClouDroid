@@ -64,6 +64,12 @@ class LocalAlbumRepository(private val context: Context) {
             val uriStr = item.uri.toString()
             val existing = uploadQueueDao.findByUri(uriStr)
             if (existing == null) {
+                val motionInfo = if (item.mimeType.startsWith("image/")) {
+                    com.getup.iClouDroid.feature.photos.data.MotionPhotoDetector.detect(context, item.uri, item.size)
+                } else {
+                    com.getup.iClouDroid.feature.photos.data.MotionPhotoInfo()
+                }
+
                 entitiesToInsert.add(
                     com.getup.iClouDroid.feature.photos.data.db.UploadQueueEntity(
                         mediaStoreUri = uriStr,
@@ -72,11 +78,26 @@ class LocalAlbumRepository(private val context: Context) {
                         fileSize = item.size,
                         localSha256 = "", // Calculated during streaming upload
                         status = "PENDING",
+                        isMotionPhoto = motionInfo.isMotionPhoto,
+                        videoOffset = motionInfo.videoOffset,
+                        videoSize = motionInfo.videoSize,
                         createdAt = now,
                         updatedAt = now
                     )
                 )
                 newlyEnqueued++
+            } else if (!existing.isMotionPhoto && item.mimeType.startsWith("image/")) {
+                val motionInfo = com.getup.iClouDroid.feature.photos.data.MotionPhotoDetector.detect(context, item.uri, item.size)
+                if (motionInfo.isMotionPhoto) {
+                    uploadQueueDao.update(
+                        existing.copy(
+                            isMotionPhoto = true,
+                            videoOffset = motionInfo.videoOffset,
+                            videoSize = motionInfo.videoSize,
+                            updatedAt = now
+                        )
+                    )
+                }
             }
         }
 

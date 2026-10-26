@@ -23,6 +23,9 @@ data class UploadQueueEntity(
     val status: String, // "PENDING", "UPLOADING", "SUCCESS", "FAILED"
     val retryCount: Int = 0,
     val lastError: String? = null,
+    val isMotionPhoto: Boolean = false,
+    val videoOffset: Long = 0L,
+    val videoSize: Long = 0L,
     val createdAt: Long,
     val updatedAt: Long
 )

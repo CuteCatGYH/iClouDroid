@@ -38,7 +38,7 @@ import com.getup.iClouDroid.feature.photos.data.db.UploadQueueEntity
         PurgedIdEntity::class,
         UploadQueueEntity::class
     ],
-    version = 9,
+    version = 10,
     exportSchema = false
 )
 abstract class PhotoDatabase : RoomDatabase() {
@@ -219,6 +219,19 @@ abstract class PhotoDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v9 → v10: Motion Photo metadata columns for upload_queue (Phase 3.2).
+         *
+         * Additive columns for Live Photo / Motion Photo backup offset tracking.
+         */
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE upload_queue ADD COLUMN isMotionPhoto INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE upload_queue ADD COLUMN videoOffset INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE upload_queue ADD COLUMN videoSize INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         @Volatile
         private var INSTANCE: PhotoDatabase? = null
 
@@ -244,7 +257,8 @@ abstract class PhotoDatabase : RoomDatabase() {
                         MIGRATION_5_6,
                         MIGRATION_6_7,
                         MIGRATION_7_8,
-                        MIGRATION_8_9
+                        MIGRATION_8_9,
+                        MIGRATION_9_10
                     )
                     .build()
                 INSTANCE = instance

@@ -302,10 +302,11 @@
   - [ ] 低电量自动暂停（WorkManager `setRequiresBatteryNotLow(true)`）
   - [ ] 仅充电时备份开关（WorkManager `setRequiresCharging(true)`）
   - [ ] 蜂窝移动网络上传开关（默认仅限 Wi-Fi，允许用户开启移动网络备份）
-- [ ] **Live Photo / 实况照片打包上传** (Phase 4 衔接)
-  - [ ] Room **v8**（`MIGRATION_7_8`）新增 `upload_queue`，**不复用** `scan_state`（扫描专用游标表）
-  - [ ] 所有写入持 `PhotoRepository.dataMutationMutex`（与月扫描/增量同步共用同一把锁）
-  - [ ] 每个阶段检查 `isWiping`，退出登录立即中断 HTTP 流并放弃写库
+- [x] **Live Photo / 实况照片打包上传** (Phase 4 衔接，详见 [ISS-044](CHANGELOG_ISSUES.md#iss-044-motion-photo--live-photo-自动拆分与双资源-cloudkit-备份上传))
+  - [x] Room **v10**（`MIGRATION_9_10`）新增 `upload_queue` 的 `isMotionPhoto` / `videoOffset` / `videoSize`
+  - [x] XMP 检测与全格式 HEIC 直扫支撑（[MotionPhotoDetector.kt](file:///Users/syh/iClouDroid/app/src/main/java/com/getup/iClouDroid/feature/photos/data/MotionPhotoDetector.kt)）
+  - [x] 本地双资源拆分与 MMR 时长/中点计算（`extractMotionPhotoComponents`）
+  - [x] Go 核心层 CloudKit 协议组装上传（`resOriginalVidComplRes` + `assetSubtypeV2 = 2` + `mediaGroupId`）
 - [ ] **鉴权前置**
   - [ ] `GetSessionStateSummary` 与上传守卫补 `X-APPLE-WEBAUTH-PCS-Photos` 校验（当前只校验 `PCS-CloudKit`）
 - [ ] **Android 端：后台任务调度 (`WorkManager`)**
@@ -317,7 +318,7 @@
 ### Phase 4: 跨生态深度适配 (安卓 + 苹果痛点打磨)
 
 - [ ] **Motion Photo ↔ Live Photo 互转**
-  - [ ] **上传（安卓 → iCloud）**：检测 `MotionPhoto_Data` / `MicroVideoOffset` XMP 标签，剥离尾部 MP4 → `MediaMuxer`/`FFmpeg` 转 `.MOV`，写入 `com.apple.quicktime.content.identifier` UUID，JPEG 注入匹配 `MakerApple` ContentIdentifier
+  - [x] **上传（安卓 → iCloud）**：检测 Motion Photo XMP 标签（GCamera 与 Container v2 多行格式），自动拆分静图与伴侣 MP4 视频，向 CloudKit 组装双资源 `CPLMaster` 与 `CPLAsset` 上传（详见 [ISS-044](CHANGELOG_ISSUES.md#iss-044-motion-photo--live-photo-自动拆分与双资源-cloudkit-备份上传)）
   - [x] **下载（iCloud → 安卓）**：`CPLMaster` 含 `resOriginalVidComplRes` 时同时下载图+视频，按 Google/三星 Motion Photo 规范插入 APP1 XMP (`GCamera:MotionPhoto="1"`) 拼接单文件，全量复制 EXIF 并将 Bitmap 物理旋转至正向（详见 [ISS-037](CHANGELOG_ISSUES.md#iss-037-实况照片单文件-motion-photo-打包与-exif-防旋转对齐)）
 - [ ] **折叠屏与大屏自适应布局**
   - [ ] `WindowSizeClass` 适配：外屏单栏底部导航 / 内屏与平板 `NavigationRail` + 双栏详情

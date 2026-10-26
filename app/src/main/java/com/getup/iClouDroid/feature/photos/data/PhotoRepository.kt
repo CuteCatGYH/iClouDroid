@@ -1775,6 +1775,12 @@ class PhotoRepository(
                 return@withContext Result.success(existingInQueue.id)
             }
 
+            val motionInfo = if (mimeType.startsWith("image/")) {
+                MotionPhotoDetector.detect(appContext, contentUri, fileSize)
+            } else {
+                MotionPhotoInfo()
+            }
+
             val entity = com.getup.iClouDroid.feature.photos.data.db.UploadQueueEntity(
                 mediaStoreUri = contentUri.toString(),
                 filename = filename,
@@ -1782,11 +1788,14 @@ class PhotoRepository(
                 fileSize = fileSize,
                 localSha256 = localSha256,
                 status = "PENDING",
+                isMotionPhoto = motionInfo.isMotionPhoto,
+                videoOffset = motionInfo.videoOffset,
+                videoSize = motionInfo.videoSize,
                 createdAt = System.currentTimeMillis(),
                 updatedAt = System.currentTimeMillis()
             )
             val queueId = database.uploadQueueDao().insert(entity)
-            Log.d(TAG, "Enqueued photo for upload: $filename (queueId: $queueId)")
+            Log.d(TAG, "Enqueued photo for upload: $filename (queueId: $queueId, motionPhoto=${motionInfo.isMotionPhoto})")
             Result.success(queueId)
         }
     }
@@ -1906,6 +1915,43 @@ class PhotoRepository(
                 ?: videoInfo?.creationDateMillis?.takeIf { it > 0 }
                 ?: System.currentTimeMillis()
 
+            var isMotionPhoto = queueItem.isMotionPhoto
+            var videoOffset = queueItem.videoOffset
+            var videoSize = queueItem.videoSize
+
+            if (!isMotionPhoto && !isVideo && queueItem.mimeType.startsWith("image/")) {
+                val motionInfo = MotionPhotoDetector.detect(context, contentUri, queueItem.fileSize)
+                if (motionInfo.isMotionPhoto) {
+                    isMotionPhoto = true
+                    videoOffset = motionInfo.videoOffset
+                    videoSize = motionInfo.videoSize
+                    Log.i(TAG, "On-the-fly MotionPhoto detected for ${queueItem.filename}: offset=$videoOffset, size=$videoSize")
+                    database.uploadQueueDao().update(
+                        queueItem.copy(
+                            isMotionPhoto = true,
+                            videoOffset = videoOffset,
+                            videoSize = videoSize,
+                            updatedAt = System.currentTimeMillis()
+                        )
+                    )
+                }
+            }
+
+            var motionComponents: LocalExifExtractor.MotionPhotoComponents? = null
+            if (isMotionPhoto && videoOffset > 0) {
+                try {
+                    motionComponents = LocalExifExtractor.extractMotionPhotoComponents(
+                        context, contentUri, videoOffset
+                    )
+                    Log.i(
+                        TAG,
+                        "Extracted Motion Photo components for ${queueItem.filename}: still=${motionComponents.stillFile.length()}B, vid=${motionComponents.videoFile.length()}B, dur=${motionComponents.videoInfo.durationMs}ms"
+                    )
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to extract Motion Photo components for ${queueItem.mediaStoreUri}: ${e.message}")
+                }
+            }
+
             val metadataJson = JSONObject().apply {
                 put("assetDate", assetDate)
                 put("originalCreationDate", assetDate)
@@ -1931,6 +1977,24 @@ class PhotoRepository(
                 exifData?.dateTimeOriginal?.let { put("dateTimeOriginal", it) }
                 exifData?.lat?.let { put("lat", it) }
                 exifData?.lon?.let { put("lon", it) }
+
+                // Motion Photo (Live Photo) attributes
+                motionComponents?.let { mc ->
+                    val mediaGroupId = java.util.UUID.randomUUID().toString()
+                    val vidInfo = mc.videoInfo
+                    val durNs = vidInfo.durationMs * 1_000_000L
+                    val dispNs = (vidInfo.durationMs / 2) * 1_000_000L
+
+                    put("isLivePhoto", true)
+                    put("livePhotoVideoPath", mc.videoFile.absolutePath)
+                    put("mediaGroupId", mediaGroupId)
+                    put("vidComplDurValue", durNs)
+                    put("vidComplDurScale", 1_000_000_000L)
+                    put("vidComplDispValue", dispNs)
+                    put("vidComplDispScale", 1_000_000_000L)
+                    put("vidComplWidth", vidInfo.width)
+                    put("vidComplHeight", vidInfo.height)
+                }
 
                 // Videos carry no EXIF, so their coordinates come from MediaStore instead.
                 // `lat`/`lon` are shared with the photo path: the Go core turns either into the
@@ -1962,7 +2026,18 @@ class PhotoRepository(
                 if (derivatives.medHeight > 0) put("medHeight", derivatives.medHeight)
             }.toString()
 
-            val rawFd = pfd.detachFd()
+            val uploadPfd = if (motionComponents != null) {
+                try {
+                    pfd.close()
+                    android.os.ParcelFileDescriptor.open(motionComponents.stillFile, android.os.ParcelFileDescriptor.MODE_READ_ONLY)
+                } catch (e: Exception) {
+                    pfd
+                }
+            } else {
+                pfd
+            }
+
+            val rawFd = uploadPfd.detachFd()
             database.uploadQueueDao().update(queueItem.copy(status = "UPLOADING", updatedAt = System.currentTimeMillis()))
 
             val jsonResultStr = try {
@@ -1975,6 +2050,8 @@ class PhotoRepository(
             } finally {
                 derivatives.thumbPath?.let { java.io.File(it).delete() }
                 derivatives.medPath?.let { java.io.File(it).delete() }
+                motionComponents?.stillFile?.delete()
+                motionComponents?.videoFile?.delete()
             }
 
             val jsonResult = JSONObject(jsonResultStr)

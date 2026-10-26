@@ -148,6 +148,12 @@ object LocalExifExtractor {
         val medHeight: Int = 0
     )
 
+    data class MotionPhotoComponents(
+        val stillFile: java.io.File,
+        val videoFile: java.io.File,
+        val videoInfo: VideoInfo
+    )
+
     /**
      * Everything `CPLMaster` needs for a movie record.
      *
@@ -503,6 +509,110 @@ object LocalExifExtractor {
             )
         } catch (e: Exception) {
             android.util.Log.w("LocalExifExtractor", "Failed to read video info: ${e.message}")
+            VideoInfo()
+        } finally {
+            runCatching { retriever.release() }
+        }
+    }
+
+    /**
+     * Extracts a Motion Photo's JPEG still and MP4 companion video into temporary files.
+     */
+    fun extractMotionPhotoComponents(
+        context: android.content.Context,
+        contentUri: android.net.Uri,
+        videoOffset: Long
+    ): MotionPhotoComponents {
+        val outDir = java.io.File(context.cacheDir, "upload_derivatives").apply { if (!exists()) mkdirs() }
+        val uuid = java.util.UUID.randomUUID().toString()
+        val stillFile = java.io.File(outDir, "motion_still_$uuid.jpg")
+        val videoFile = java.io.File(outDir, "motion_vid_$uuid.mp4")
+
+        context.contentResolver.openInputStream(contentUri)?.use { input ->
+            stillFile.outputStream().use { stillOut ->
+                val buffer = ByteArray(8192)
+                var bytesRemaining = videoOffset
+                while (bytesRemaining > 0) {
+                    val toRead = minOf(buffer.size.toLong(), bytesRemaining).toInt()
+                    val read = input.read(buffer, 0, toRead)
+                    if (read <= 0) break
+                    stillOut.write(buffer, 0, read)
+                    bytesRemaining -= read
+                }
+            }
+
+            videoFile.outputStream().use { videoOut ->
+                val buffer = ByteArray(8192)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read <= 0) break
+                    videoOut.write(buffer, 0, read)
+                }
+            }
+        }
+
+        val videoInfo = extractVideoInfoFromFile(videoFile)
+        return MotionPhotoComponents(
+            stillFile = stillFile,
+            videoFile = videoFile,
+            videoInfo = videoInfo
+        )
+    }
+
+    /**
+     * Extracts video info from a local video [File].
+     */
+    fun extractVideoInfoFromFile(file: java.io.File): VideoInfo {
+        val retriever = android.media.MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(file.absolutePath)
+
+            var width = retriever
+                .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+                ?.toIntOrNull() ?: 0
+            var height = retriever
+                .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+                ?.toIntOrNull() ?: 0
+            val rotation = retriever
+                .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
+                ?.toIntOrNull() ?: 0
+
+            if (rotation == 90 || rotation == 270) {
+                val swapped = width
+                width = height
+                height = swapped
+            }
+
+            val duration = retriever
+                .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
+                ?.toLongOrNull() ?: 0L
+
+            val frameRate = retriever
+                .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE)
+                ?.toDoubleOrNull()
+                ?: retriever
+                    .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_FRAME_COUNT)
+                    ?.toDoubleOrNull()
+                    ?.takeIf { duration > 0 }
+                    ?.let { it / (duration / 1000.0) }
+
+            val mime = retriever
+                .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_MIMETYPE)
+
+            VideoInfo(
+                width = width,
+                height = height,
+                durationMs = duration,
+                rotation = rotation,
+                frameRate = frameRate,
+                codec = codecName(mime),
+                creationDateMillis = 0L,
+                make = android.os.Build.MANUFACTURER?.takeIf { it.isNotBlank() },
+                model = android.os.Build.MODEL?.takeIf { it.isNotBlank() },
+                software = android.os.Build.VERSION.RELEASE
+            )
+        } catch (e: Exception) {
+            android.util.Log.w("LocalExifExtractor", "Failed to read video info from file: ${e.message}")
             VideoInfo()
         } finally {
             runCatching { retriever.release() }

@@ -1005,8 +1005,8 @@ totalDragX > 0  →  右滑  →  上一张
 | Phase 2：照片库拉取、全库月扫描分段、月分组展示与本地缓存（只读预览） | ✅ 完成 |
 | Phase 2.5：双向删除同步、全量对账、设置页与周期扫描 | ✅ 完成 |
 | Phase 2.6：Glimpse 风相册 UI、日/月视图、Monet 主题、本地相册、系统云端媒体提供方 | ✅ 完成（有已知残留）|
-| Phase 3：Android 本地相册自动备份（增量上传） | 🟡 进行中 (Phase 3.1 底层已完成，Phase 3.2 备份 UI 与策略开发中) |
-| Phase 4：跨生态深度适配（Motion Photo ↔ Live Photo 单文件打包、EXIF 与旋转对齐） | 🟡 进行中 (下载端已完成) |
+| Phase 3：Android 本地相册自动备份（增量上传） | 🟡 进行中 (Phase 3.1 与 Live Photo 上传已完成，Phase 3.2 备份 UI 与策略开发中) |
+| Phase 4：跨生态深度适配（Motion Photo ↔ Live Photo 双向单文件互转与上传下载对齐） | 🟡 进行中 (Live Photo 上传与下载双向互转已完成，详见 [ISS-044](CHANGELOG_ISSUES.md#iss-044-motion-photo--live-photo-自动拆分与双资源-cloudkit-备份上传)) |
 
 ### Phase 2.6 交付清单（本轮 UI 与系统集成）
 

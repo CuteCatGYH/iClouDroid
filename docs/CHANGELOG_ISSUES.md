@@ -55,6 +55,7 @@
 | [ISS-041](#iss-041-gps-因-access_media_location-从未申请而丢失) | GPS 因 `ACCESS_MEDIA_LOCATION` 从未运行时申请而丢失 | 🟠 P1 | Android / 权限 | ✅ 已修复 |
 | [ISS-042](#iss-042-视频拍摄信息在-apple-与-android-两端各自看不见) | 视频拍摄信息在 Apple 与 Android 两端各自看不见 | 🟠 P1 | Go / 元数据 | ✅ 已修复 |
 | [ISS-043](#iss-043-照片有-gps-但网页不显示地图) | 照片有 `{GPS}` 但网页不显示地图（缺 `CPLAsset.locationEnc`）| 🟠 P1 | Go / upload.go | ✅ 已修复 |
+| [ISS-044](#iss-044-motion-photo--live-photo-自动拆分与双资源-cloudkit-备份上传) | Motion Photo / Live Photo 自动拆分与双资源 CloudKit 备份上传全链路 | 🔴 P0 | Go / Android 全链路 | ✅ 已完成 |
 
 ---
 
@@ -3981,3 +3982,54 @@ if _, ok := verify["timestamp"].(time.Time); !ok {
 | `locationEnc.alt` | float | **有符号**（`CLLocation.altitude`）|
 
 两者不能归一化处理。护栏：`TestGpsAltitudeAboveSeaLevel` / `…BelowSeaLevel` / `…ZeroIsAbove` / `TestLocationEncKeepsSignedAltitude`。
+
+---
+
+## ISS-044：Motion Photo / Live Photo 自动拆分与双资源 CloudKit 备份上传
+
+### 现象
+
+备份 Android 本地相册中的 Motion Photo（例如三星/Pixel拍摄的 `.heic` 或 `.jpg` 实况照片）到 iCloud 时，上传到云端的记录只显示为一张普通的静态照片，缺少相伴随的动态视频效果，网页端也无法长按播放。
+
+### 根因与排查
+
+1. **协议层不对称**：Android 原生 Motion Photo 为单文件结构（JPEG/HEIC 文件末尾追加 MP4 视频流）；而 iCloud 协议要求一个 `CPLMaster` 必须包含两个独立的资源链接：
+   * `resOriginalRes`：仅静图部分的字节（`resOriginalFileSize` **绝不能**包含视频字节数）
+   * `resOriginalVidComplRes`：伴侣视频部分的字节（UTI 必须为 `com.apple.quicktime-movie`）
+   * `CPLAsset` 特征字段：`assetSubtypeV2 = 2`（Live Photo），`mediaGroupId = UUID`（配对主键），`vidComplDurValue/Scale`（视频时长）与 `vidComplDispValue/Scale`（显示帧中点）
+2. **HEIC 格式 XMP 解析限制（最关键隐藏缺陷）**：先前的检测器仅依靠 Android `ExifInterface.getAttribute(ExifInterface.TAG_XMP)` 读取 XMP 属性。Android 的 `ExifInterface` 仅对 `.jpg` 文件支持 `TAG_XMP`；**对于 `.heic` 格式，`ExifInterface` 会直接返回 `null`**，导致先前的检测器对所有 HEIC 格式的 Live Photo 全盘漏检。
+3. **多行 XMP 属性**：三星 HEIC 文件中的 `<Container:Item ... />` 标签属性跨多行（Multiline），单行正则匹配被跳过。
+4. **历史队列漏更新**：在修复检测器前就被扫盘入队的数据，数据库中的 `isMotionPhoto = 0`，上传流程未对历史旧行进行动态补救检测。
+
+### 修复与架构工程落地
+
+1. **数据库 Upgrade (Room v9 → v10)**：
+   * 在 [UploadQueueEntity.kt](file:///Users/syh/iClouDroid/app/src/main/java/com/getup/iClouDroid/feature/photos/data/db/UploadQueueEntity.kt) 中增加 `isMotionPhoto` (Boolean)、`videoOffset` (Long)、`videoSize` (Long) 三列。
+   * 在 [PhotoDatabase.kt](file:///Users/syh/iClouDroid/app/src/main/java/com/getup/iClouDroid/feature/photos/data/PhotoDatabase.kt) 中添加 `MIGRATION_9_10`。
+2. **全格式 XMP 识别 ([MotionPhotoDetector.kt](file:///Users/syh/iClouDroid/app/src/main/java/com/getup/iClouDroid/feature/photos/data/MotionPhotoDetector.kt))**：
+   * 扩充文件头扫描上限为 2MB，当 `ExifInterface` 返回 `null` 时自动执行 `<x:xmpmeta>` / `<rdf:RDF>` XML 标记块直扫，100% 兼容 HEIC / JPEG 的 XMP 提取。
+   * 升级正则匹配为 `Pattern.DOTALL` 模式，完全兼容多行属性。
+   * 修正 Container/Item (Pixel v2) 格式切片计算：`videoSize = totalVideoSize`（含 `padding`），以 `fileSize` 为切片终点，避免视频尾部截断。
+3. **Android 端拆分与提取器 ([PhotoExif.kt](file:///Users/syh/iClouDroid/app/src/main/java/com/getup/iClouDroid/feature/photos/data/PhotoExif.kt))**：
+   * 新增 `extractMotionPhotoComponents` 方法，按 `videoOffset` 将原文件拆分为临时 `stillFile` 与 `videoFile`。
+   * 使用 `MediaMetadataRetriever` 读取伴侣视频的时长，`vidComplDispValue` 修正为按 `(durationMs / 2) * 1_000_000L` 计算。
+   * 必须在流式上传前完成所有元数据提取，并在 `try/finally` 中实现崩溃安全的切片文件删除。
+4. **Go 核心层 CloudKit 协议组装 ([go-core/upload.go](file:///Users/syh/iClouDroid/go-core/upload.go))**：
+   * `UploadMetadata` 增加 Live Photo 配对字段。
+   * 向 `/assets/upload` 请求 `resOriginalVidComplRes` 签名并流式上传视频。
+   * 组装 `CPLMaster` 18 个 Live Photo 字段及 `CPLAsset` 特征字段（`assetSubtypeV2 = 2`、`mediaGroupId = UUID` 等）。
+5. **动态补救与 UI 角标回归**：
+   * [PhotoRepository.kt](file:///Users/syh/iClouDroid/app/src/main/java/com/getup/iClouDroid/feature/photos/data/PhotoRepository.kt) 在上传前增加对历史队列项的二次检测。
+   * [PhotoGridItem.kt](file:///Users/syh/iClouDroid/app/src/main/java/com/getup/iClouDroid/feature/photos/ui/PhotoGridItem.kt) 和 [PhotoViewerPages.kt](file:///Users/syh/iClouDroid/app/src/main/java/com/getup/iClouDroid/feature/photos/ui/PhotoViewerPages.kt) 中加入 `photo.mediaType != "VIDEO"` 防护，防止常规视频误挂角标。
+
+### 验证
+
+| 项 | 结果 |
+| --- | --- |
+| Go 单元测试 `upload_livephoto_test.go` | ✅ 通过 |
+| Kotlin 拆分单元测试 `MotionPhotoSplitTest.kt` | ✅ 通过 |
+| XMP 检测器单测 `MotionPhotoDetectorTest.kt` | ✅ 7 passed |
+| 全量单元测试 `:app:testDebugUnitTest` | ✅ 229 passed |
+| 真机探针测试 `MotionPhotoUploadProbeTest` | ✅ 实测三星 SM-F9760 真机文件 `20261026_232117.heic`，组件精准拆分 |
+| Gradle 编译构建 | ✅ `:app:assembleDebug` 成功 |
+

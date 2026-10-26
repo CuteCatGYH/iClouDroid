@@ -62,6 +62,17 @@ type UploadMetadata struct {
 	MedHeight        int    `json:"medHeight,omitempty"`
 	MediaMetaDataEnc string `json:"mediaMetaDataEnc,omitempty"` // Base64 encoded binary/xml plist
 	LocationEnc      string `json:"locationEnc,omitempty"`      // Base64 encoded location
+
+	// Live Photo (Motion Photo) companion attributes
+	IsLivePhoto        bool   `json:"isLivePhoto,omitempty"`
+	LivePhotoVideoPath string `json:"livePhotoVideoPath,omitempty"` // Local temp file path for companion QuickTime video
+	MediaGroupId       string `json:"mediaGroupId,omitempty"`       // UUID pairing the still image and video companion
+	VidComplDurValue   int64  `json:"vidComplDurValue,omitempty"`   // Duration in ns (e.g. 2631666667)
+	VidComplDurScale   int64  `json:"vidComplDurScale,omitempty"`   // Duration scale (1000000000)
+	VidComplDispValue  int64  `json:"vidComplDispValue,omitempty"`  // Display timestamp in ns (e.g. 1349973637)
+	VidComplDispScale  int64  `json:"vidComplDispScale,omitempty"`  // Display timestamp scale (1000000000)
+	VidComplWidth      int    `json:"vidComplWidth,omitempty"`      // Companion video width
+	VidComplHeight     int    `json:"vidComplHeight,omitempty"`     // Companion video height
 }
 
 type UploadResult struct {
@@ -416,6 +427,22 @@ func uploadPhotoAssetFromFile(f *os.File, filename string, mimeType string, meta
 		}
 	}
 
+	var fVid *os.File
+	var vidSize int64
+	var vidSha256 string
+	if meta.IsLivePhoto && meta.LivePhotoVideoPath != "" {
+		if fv, err := os.Open(meta.LivePhotoVideoPath); err == nil {
+			if infoV, err := fv.Stat(); err == nil && infoV.Size() > 0 {
+				if shaV, err := computeFileSha256Base64(fv); err == nil {
+					fVid = fv
+					vidSize = infoV.Size()
+					vidSha256 = shaV
+					defer fVid.Close()
+				}
+			}
+		}
+	}
+
 	// 3. Request /assets/upload token for original + derivatives
 	tokensReq := []map[string]interface{}{
 		{
@@ -423,6 +450,13 @@ func uploadPhotoAssetFromFile(f *os.File, filename string, mimeType string, meta
 			"fieldName":  "resOriginalRes",
 			"signature":  sha256Base64,
 		},
+	}
+	if vidSha256 != "" {
+		tokensReq = append(tokensReq, map[string]interface{}{
+			"recordType": "CPLMaster",
+			"fieldName":  "resOriginalVidComplRes",
+			"signature":  vidSha256,
+		})
 	}
 	if thumbSha256 != "" {
 		tokensReq = append(tokensReq, map[string]interface{}{
@@ -516,6 +550,21 @@ func uploadPhotoAssetFromFile(f *os.File, filename string, mimeType string, meta
 		}
 	}
 
+	var uploadWarnings []string
+
+	var vidReceipt *mmcsReceipt
+	if fVid != nil {
+		if vidUrl := uploadUrlMap["resOriginalVidComplRes"]; vidUrl != "" {
+			if rec, err := uploadFileToUrl(fVid, vidSize, vidUrl); err == nil {
+				vidReceipt = rec
+			} else {
+				uploadWarnings = append(uploadWarnings, fmt.Sprintf("resOriginalVidComplRes upload failed: %v", err))
+			}
+		} else {
+			uploadWarnings = append(uploadWarnings, "resOriginalVidComplRes token/url was missing from /assets/upload response")
+		}
+	}
+
 	mmcsChecksum := origReceipt.FileChecksum
 	if mmcsChecksum == "" {
 		return makeUploadError("EMPTY_FILE_CHECKSUM", "fileChecksum in receipt is empty")
@@ -549,7 +598,7 @@ func uploadPhotoAssetFromFile(f *os.File, filename string, mimeType string, meta
 
 	// Accumulates the result while the record is being built, so optional-field skips can be
 	// recorded as they happen instead of being swallowed.
-	res := UploadResult{Success: true, FileChecksum: mmcsChecksum}
+	res := UploadResult{Success: true, FileChecksum: mmcsChecksum, Warnings: uploadWarnings}
 
 	fileResourceObj := map[string]interface{}{
 		"size":              origReceipt.Size,
@@ -675,6 +724,28 @@ func uploadPhotoAssetFromFile(f *os.File, filename string, mimeType string, meta
 		}
 	}
 
+	// Attach Live Photo Companion Video
+	if vidReceipt != nil {
+		masterFields["resOriginalVidComplRes"] = map[string]interface{}{
+			"value": map[string]interface{}{
+				"size":              vidReceipt.Size,
+				"fileChecksum":      vidReceipt.FileChecksum,
+				"referenceChecksum": vidReceipt.ReferenceChecksum,
+				"wrappingKey":       vidReceipt.WrappingKey,
+				"receipt":           vidReceipt.Receipt,
+			},
+		}
+		masterFields["resOriginalVidComplFingerprint"] = map[string]interface{}{"value": vidReceipt.FileChecksum}
+		masterFields["resOriginalVidComplFileSize"] = map[string]interface{}{"value": vidReceipt.Size}
+		masterFields["resOriginalVidComplFileType"] = map[string]interface{}{"value": "com.apple.quicktime-movie"}
+		if meta.VidComplWidth > 0 {
+			masterFields["resOriginalVidComplWidth"] = map[string]interface{}{"value": meta.VidComplWidth}
+		}
+		if meta.VidComplHeight > 0 {
+			masterFields["resOriginalVidComplHeight"] = map[string]interface{}{"value": meta.VidComplHeight}
+		}
+	}
+
 	// Attach the metadata block.
 	//
 	// Two different payloads, two different `mediaMetaDataType` values:
@@ -746,7 +817,30 @@ func uploadPhotoAssetFromFile(f *os.File, filename string, mimeType string, meta
 			"value": timeZoneOffsetSeconds(meta.AssetDate),
 		},
 	}
-	if isVideo {
+	if meta.IsLivePhoto && vidReceipt != nil {
+		// Live Photo assetSubtypeV2 = 2
+		assetFields["assetSubtypeV2"] = map[string]interface{}{"value": 2}
+		if meta.MediaGroupId != "" {
+			assetFields["mediaGroupId"] = map[string]interface{}{"value": meta.MediaGroupId}
+		}
+		if meta.VidComplDurValue > 0 {
+			assetFields["vidComplDurValue"] = map[string]interface{}{"value": meta.VidComplDurValue}
+			durScale := meta.VidComplDurScale
+			if durScale <= 0 {
+				durScale = 1000000000
+			}
+			assetFields["vidComplDurScale"] = map[string]interface{}{"value": durScale}
+		}
+		if meta.VidComplDispValue > 0 {
+			assetFields["vidComplDispValue"] = map[string]interface{}{"value": meta.VidComplDispValue}
+			dispScale := meta.VidComplDispScale
+			if dispScale <= 0 {
+				dispScale = 1000000000
+			}
+			assetFields["vidComplDispScale"] = map[string]interface{}{"value": dispScale}
+		}
+		assetFields["vidComplVisibilityState"] = map[string]interface{}{"value": 0}
+	} else if isVideo {
 		// `assetSubtypeV2` is **0** on a plain video - confirmed against a genuine iPhone SE
 		// capture. The `102` seen on a third-party import belongs to that importer, not to video
 		// as a class, so copying it would mislabel every clip.

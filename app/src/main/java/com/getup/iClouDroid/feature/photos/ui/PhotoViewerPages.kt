@@ -157,7 +157,7 @@ fun ImageViewerPage(
     var isDegrading by remember(photo.id) { mutableStateOf(false) }
 
     // Live Photo state and playback
-    val isLivePhoto = photo.mediaType == "LIVE_PHOTO" || !photo.videoComplUrl.isNullOrBlank()
+    val isLivePhoto = photo.mediaType == "LIVE_PHOTO" || (photo.mediaType != "VIDEO" && !photo.videoComplUrl.isNullOrBlank())
     var liveVideoUrl by remember(photo.id) { mutableStateOf(photo.videoComplUrl) }
     var isLivePlaying by remember(photo.id) { mutableStateOf(false) }
 

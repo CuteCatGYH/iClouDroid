@@ -131,7 +131,7 @@ fun PhotoGridItem(
         }
 
         // Live Photo Badge
-        if (photo.mediaType == "LIVE_PHOTO" || !photo.videoComplUrl.isNullOrBlank()) {
+        if (photo.mediaType == "LIVE_PHOTO" || (photo.mediaType != "VIDEO" && !photo.videoComplUrl.isNullOrBlank())) {
             Box(
                 modifier = Modifier
                     .align(Alignment.TopStart)
