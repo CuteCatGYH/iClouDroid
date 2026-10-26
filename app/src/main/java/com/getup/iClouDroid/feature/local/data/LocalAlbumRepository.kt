@@ -13,7 +13,7 @@ import kotlinx.coroutines.withContext
  */
 class LocalAlbumRepository(private val context: Context) {
 
-    suspend fun queryLocalAlbums(): List<LocalAlbum> = withContext(Dispatchers.IO) {
+    suspend fun queryLocalAlbums(enabledBucketIds: Set<String> = emptySet()): List<LocalAlbum> = withContext(Dispatchers.IO) {
         val albumsMap = linkedMapOf<String, AlbumAccumulator>()
 
         // 1. Query Images
@@ -36,9 +36,113 @@ class LocalAlbumRepository(private val context: Context) {
                 name = acc.name,
                 coverUri = acc.coverUri,
                 itemCount = acc.count,
-                relativePath = acc.relativePath
+                relativePath = acc.relativePath,
+                isBackupEnabled = acc.bucketId in enabledBucketIds
             )
         }.sortedByDescending { it.itemCount }
+    }
+
+    /**
+     * Scans local media for a given bucketId and enqueues missing items into [UploadQueueDao].
+     *
+     * @return Number of newly enqueued items.
+     */
+    suspend fun scanAndEnqueueBucket(
+        bucketId: String,
+        uploadQueueDao: com.getup.iClouDroid.feature.photos.data.db.UploadQueueDao
+    ): Int = withContext(Dispatchers.IO) {
+        val mediaItems = mutableListOf<LocalMediaItem>()
+
+        queryBucketMedia(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, bucketId, mediaItems)
+        queryBucketMedia(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, bucketId, mediaItems)
+
+        var newlyEnqueued = 0
+        val now = System.currentTimeMillis()
+        val entitiesToInsert = mutableListOf<com.getup.iClouDroid.feature.photos.data.db.UploadQueueEntity>()
+
+        for (item in mediaItems) {
+            val uriStr = item.uri.toString()
+            val existing = uploadQueueDao.findByUri(uriStr)
+            if (existing == null) {
+                entitiesToInsert.add(
+                    com.getup.iClouDroid.feature.photos.data.db.UploadQueueEntity(
+                        mediaStoreUri = uriStr,
+                        filename = item.displayName,
+                        mimeType = item.mimeType,
+                        fileSize = item.size,
+                        localSha256 = "", // Calculated during streaming upload
+                        status = "PENDING",
+                        createdAt = now,
+                        updatedAt = now
+                    )
+                )
+                newlyEnqueued++
+            }
+        }
+
+        if (entitiesToInsert.isNotEmpty()) {
+            uploadQueueDao.insertAll(entitiesToInsert)
+        }
+
+        newlyEnqueued
+    }
+
+    private fun queryBucketMedia(
+        contentUri: Uri,
+        bucketId: String,
+        output: MutableList<LocalMediaItem>
+    ) {
+        val projection = arrayOf(
+            MediaStore.MediaColumns._ID,
+            MediaStore.MediaColumns.DISPLAY_NAME,
+            MediaStore.MediaColumns.MIME_TYPE,
+            MediaStore.MediaColumns.DATE_MODIFIED,
+            MediaStore.MediaColumns.SIZE,
+            MediaStore.MediaColumns.BUCKET_ID
+        )
+
+        val selection = "${MediaStore.MediaColumns.BUCKET_ID} = ?"
+        val selectionArgs = arrayOf(bucketId)
+
+        try {
+            context.contentResolver.query(
+                contentUri,
+                projection,
+                selection,
+                selectionArgs,
+                "${MediaStore.MediaColumns.DATE_MODIFIED} DESC"
+            )?.use { cursor ->
+                val idCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
+                val nameCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
+                val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE)
+                val dateCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_MODIFIED)
+                val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
+
+                while (cursor.moveToNext()) {
+                    val id = cursor.getLong(idCol)
+                    val displayName = cursor.getString(nameCol) ?: "unnamed"
+                    val mimeType = cursor.getString(mimeCol) ?: if (contentUri == MediaStore.Video.Media.EXTERNAL_CONTENT_URI) "video/mp4" else "image/jpeg"
+                    val dateModified = cursor.getLong(dateCol)
+                    val size = cursor.getLong(sizeCol)
+
+                    val itemUri = ContentUris.withAppendedId(contentUri, id)
+
+                    output.add(
+                        LocalMediaItem(
+                            id = id,
+                            uri = itemUri,
+                            displayName = displayName,
+                            mimeType = mimeType,
+                            dateTaken = dateModified * 1000L,
+                            size = size,
+                            bucketId = bucketId
+                        )
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            // Permission or query failure
+        }
     }
 
     private fun queryMediaBuckets(

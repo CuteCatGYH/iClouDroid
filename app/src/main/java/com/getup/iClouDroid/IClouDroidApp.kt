@@ -45,6 +45,9 @@ class IClouDroidApp : Application() {
                 Log.w(TAG, "Coil warm-up failed: ${e.message}")
             }
         }
+
+        // Schedule background backup worker on startup
+        com.getup.iClouDroid.feature.photos.work.PhotoBackupWorker.scheduleBackup(this)
     }
 
     private companion object {

@@ -78,6 +78,7 @@ dependencies {
 
     // WorkManager: keeps the month scan running while the app is backgrounded (P2-016).
     implementation(libs.androidx.work.runtime)
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
 
     // Shizuku: enables shell-level execution to register and set system cloud media providers
     implementation(libs.shizuku.api)

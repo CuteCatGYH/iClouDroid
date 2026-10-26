@@ -434,13 +434,22 @@ func parseRecords(rawRecords []CKRecord) ([]PhotoItem, []string) {
 			item.OriginalURL = m.originalURL
 			item.VideoComplURL = m.videoComplURL
 
-			if m.videoComplURL != "" {
-				item.MediaType = "LIVE_PHOTO"
-			} else if strings.Contains(strings.ToLower(m.itemType), "movie") ||
-				strings.Contains(strings.ToLower(m.itemType), "video") ||
-				strings.Contains(strings.ToLower(m.itemType), "mp4") ||
-				duration > 0 {
+			// Order matters: the item type decides video-vs-photo, and the paired-resource check
+			// only distinguishes a Live Photo from a still.
+			//
+			// Testing `videoComplURL` first - the previous order - made any movie carrying a
+			// `resVidComplRes` claim report itself as LIVE_PHOTO. Android then tried to pack it
+			// into a Motion Photo: a video appended to a JPEG-shaped container, i.e. a file that is
+			// neither a valid JPEG nor a playable movie.
+			lowerItemType := strings.ToLower(m.itemType)
+			switch {
+			case strings.Contains(lowerItemType, "movie") ||
+				strings.Contains(lowerItemType, "video") ||
+				strings.Contains(lowerItemType, "mp4") ||
+				duration > 0:
 				item.MediaType = "VIDEO"
+			case m.videoComplURL != "":
+				item.MediaType = "LIVE_PHOTO"
 			}
 		} else {
 			item.Filename = asset.RecordName

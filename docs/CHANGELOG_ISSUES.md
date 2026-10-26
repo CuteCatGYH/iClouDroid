@@ -1,5 +1,4 @@
-78+/98+
-*/fiu# CHANGELOG_ISSUES.md — 已修复问题案例档案
+# CHANGELOG_ISSUES.md — 已修复问题案例档案
 
 > **用途**：沉淀 iClouDroid 开发过程中**实测复现 → 定位根因 → 修复验证**的完整问题案例，供后续 Phase 遇到相似故障时快速比对，避免重复踩坑。
 >
@@ -50,6 +49,12 @@
 | [ISS-035](#iss-035photopicker-缩略图空白多层柹障式修复与已知残留) | **PhotoPicker 缩略图空白：多层柹障式修复与已知残留**（含桹障十二：视频被错报为图片）| 🔴 P0 | Android / Provider | ⚠️ 已修 12 层，待实机复测 |
 | [ISS-036](#iss-036-收藏操作导致-live_photo-媒体类型被冲刷覆写为-image) | 收藏操作导致 `LIVE_PHOTO` 媒体类型被冲刷覆写为 `IMAGE` | 🟠 P1 | Go / Repository | ✅ 已修复 |
 | [ISS-037](#iss-037-实况照片单文件-motion-photo-打包与-exif-防旋转对齐) | 实况照片单文件 Motion Photo 打包、全量 EXIF 保留与防旋转对齐 | 🟠 P1 | Android / MediaStore | ✅ 已修复 |
+| [ISS-038](#iss-038-年月跳转小窗月份轻封面缩略图空白四层断链修复) | 年月跳转小窗月份轻封面缩略图空白（四层断链修复） | 🟠 P1 | Android / DAO + UI | ✅ 已修复 |
+| [ISS-039](#iss-039-phase-3-本地相册后台自动备份与零内存流式上传工程落地) | Phase 3 本地相册后台自动备份与零内存流式上传工程落地 | 🔴 P0 | Go / Android 全链路 | ✅ 已完成 |
+| [ISS-040](#iss-040-上传的照片和视频在-apple-端全部不可渲染) | 上传的照片和视频在 Apple 端全部不可渲染（灰块 / 感叹号） | 🔴 P0 | Go / upload.go | ✅ 已修复 |
+| [ISS-041](#iss-041-gps-因-access_media_location-从未申请而丢失) | GPS 因 `ACCESS_MEDIA_LOCATION` 从未运行时申请而丢失 | 🟠 P1 | Android / 权限 | ✅ 已修复 |
+| [ISS-042](#iss-042-视频拍摄信息在-apple-与-android-两端各自看不见) | 视频拍摄信息在 Apple 与 Android 两端各自看不见 | 🟠 P1 | Go / 元数据 | ✅ 已修复 |
+| [ISS-043](#iss-043-照片有-gps-但网页不显示地图) | 照片有 `{GPS}` 但网页不显示地图（缺 `CPLAsset.locationEnc`）| 🟠 P1 | Go / upload.go | ✅ 已修复 |
 
 ---
 
@@ -2814,7 +2819,7 @@ BackHandler(enabled = true) { closeWithAnimation() }   // 兵底 + 普通返回�
 | `mediaMetaDataEnc` = base64(binary plist) | 详情面板需引入 plist 解析器（建议 `howett.net/plist`） |
 | 含 `{Exif}` / `{GPS}` / `{TIFF}` / `{PNG}` 子字典 | 光圈/快门/ISO/焦距/镜头/GPS/海拔均可取 |
 | `{GPS}` 仅有定位的照片才有（实测 8/25） | UI 必须按字段存在性条件渲染 |
-| `resOriginalFingerprint` 现成 | **Phase 3 查重无需自己算哈希** |
+| `resOriginalFingerprint` = `masterId` = MMCS `fileChecksum`（21 字节 Base64） | Phase 3 查重两阶段：先 SHA-256 本地索引，再 `/records/lookup` 云端兜底（见 [REFERENCE.md §3A.4](REFERENCE.md)） |
 | `CPLAsset.locationEnc` 独立存在 | 只判断“有无位置”时不必解码 plist |
 | `/records/query` 的 `resultsLimit` 必须 > 1 | 传 1 直接 400 |
 
@@ -2961,7 +2966,7 @@ UI 侧（设置 → 系统整合 → 云端媒体提供方）提供双轨：
 **优先级**：🔴 P0（用户首屏即遇到）
 **归属**：`provider/ICloudMediaProvider.kt`、`feature/photos/data/db/PhotoDao.kt`
 **发现时间**：ISS-034 修复后首次使用系统照片选择器
-**状态**：⚠️ **已修 11 层（第 9~11 层为 2026-10 重新归因），待实机复测**
+**状态**：⚠️ **已修 12 层（第 9~11 层为 2026-10 重新归因，第 12 层为桹障七的反向修正），待实机复测**
 
 ### 现象
 
@@ -3282,10 +3287,11 @@ videoNames.forEach { name ->
 > 定位它的唯一方法就是去看**系统进程的日志**（`Glide` tag），而不是只看自己进程的日志。
 
 > [!CAUTION]
-> **`CloudMediaProvider` 的 MIME 必须描述“`onOpenPreview` 返回的字节”，而不是“原始媒体”。**
-> 这与官方文档字面意思（“thumbnail should be in the original MIME_TYPE”）相反——
-> 但实测证明：按文档写视频报 `video/*`，Glide 会拿 `MediaMetadataRetriever` 去解 JPEG，必然失败。
-> 以实测为准。
+> **`MIME_TYPE` 必须报真实媒体类型（视频报 `video/*`），契约的另一半交给 `onOpenPreview`。**
+> 这与桹障七的“临时修法”相反，也是本条最容易再次走反的一步：为了迁就 Glide 的 JPEG 缩略图
+> 而把视频报成 `image/jpeg`，换来的是**视频被系统当成静态图片**（丢时长角标与视频分类，见桹障十二）。
+> 正确做法是**不改 `MIME_TYPE`**，改由 `onOpenPreview` 对视频行返回**真实视频容器**字节，
+> `VideoDecoder` 才有帧可抓；取不到时才回退到 JPEG 缩略图。
 
 > [!IMPORTANT]
 > **“provider 返回成功”不等于“provider 做对了”。**
@@ -3360,4 +3366,618 @@ videoNames.forEach { name ->
 - 相册“详细信息”面板完美显示 iPhone 设备型号、快门、ISO、GPS 坐标。
 - 静态图与实况视频方向 100% 一致正向。
 
+---
 
+## ISS-038：年月跳转小窗月份轻封面缩略图空白（四层断链修复）
+
+**优先级**：🟠 P1（用户可见的体验缺陷，不阻塞主流程）
+**归属**：`feature/photos/data/db/PhotoMonthIndexDao.kt`、`feature/photos/data/MonthScanEngine.kt`、`feature/photos/ui/MonthCoverModel.kt`、`feature/photos/ui/MonthIndexBar.kt`
+**发现时间**：Phase 2.6 年月跳转小窗上线后
+**状态**：✅ 已修复
+
+### 现象
+
+打开年月跳转小窗，十二个月份格子只有月名文字与底色，**没有照片封面**。
+格子**可以点击**、月份导航正常、也不置灰，只是图不出现。
+
+### 为什么难定位：四层断链同时存在
+
+排查中先修掉了四个真问题（每次修完仍有空白残留），最终确认缺陷横跨
+**DAO（查询）→ 扫描引擎（写入）→ 模型（判据）→ 渲染（换链）**四段链路，每一段都断了一环。
+
+#### 先行修复的四个诱因（单独看都“修好了”，但格子仍空）
+
+| # | 问题 | 修复 |
+| --- | --- | --- |
+| 1 | `MonthCoverModel` 从封面行推导「该月有无照片」 | 改用 `photo_month_index` 的 `YearSection.available` |
+| 2 | 月份格子被 `Row` 拉伸到 141px | 行与网格显式 `width()` + 格子 `weight(1f)` |
+| 3 | 手写 `ImageLoader.Builder` **没有磁盘缓存** | 显式 `.diskCache { DiskCache.Builder()... }`（预热从新增 0 文件 → 352K→6.4M） |
+| 4 | `cacheOnly` 分支把 `data` 置为空串 | 该分支只设 cache key，不改 `data` |
+
+#### 真正的四层断链（最终根因）
+
+| # | 断链位置 | 根因 | 修复 |
+| --- | --- | --- | --- |
+| A | `MonthScanEngine.refreshMonthIndex` | `@Insert(REPLACE)` 的 `upsert` 漏写 `coverAssetId`，整行覆盖 → `rebuildMonthIndexFor` 刚回填的封面，下一批扫描就被抹成 `null`（日志写“108/108 updated”却依然没图） | 读旧值保留；缺失时现场查 `photoDao.newestInMonth(yearMonth)?.id` |
+| B | `MonthCoverModel.cellsFor` | 要求 `coverThumbUrl` **非空**才产出 `Cover`，否则降级为灰底 `Placeholder`。而 `thumbUrl` 只是瞬时快照（签名 ~15 分钟失效，批量写库时云端可能压根没返回） | 判据从「有没有 URL」改为「有没有 `coverAssetId`」；仅对 `VIDEO` / `LIVE_PHOTO` 保留“必须有 thumbUrl”的降级（[AGENTS §6.7.5c](AGENTS.md#675c-视频缩略图永远不能降级到-medurl--originalurl)） |
+| C | `PhotoMonthIndexDao` / `MonthIndexBar` | SQL 没查 `a.masterId AS coverMasterId`，且 `ICloudImageModel(masterId = "")` 硬编码 → 拦截器 `refreshUrlsForMaster("")` 必然失败，永远拿不到图 | DAO 补列；`MonthCoverCell.Cover` 增加 `coverMasterId`；`MonthIndexBar` 透传 `masterId = cell.coverMasterId` |
+| D | `MonthCoverRow.coverMasterId` | 字段已声明但 DAO 未 select、`cellsFor` 未透传、`Cover` 未持有 | 按 C 的三处联动一并补齐 |
+
+### 修复方案
+
+#### 1. DAO：补 `masterId` + `COALESCE` 兜底
+
+```sql
+SELECT m.yearMonth        AS yearMonth,
+       m.itemCount        AS itemCount,
+       COALESCE(m.coverAssetId,
+                (SELECT id FROM photo_assets
+                  WHERE isHidden = 0 AND yearMonth = m.yearMonth
+                  ORDER BY assetDate DESC, id ASC LIMIT 1)) AS coverAssetId,
+       a.masterId         AS coverMasterId,
+       a.thumbUrl         AS coverThumbUrl,
+       a.mediaType        AS coverMediaType
+FROM photo_month_index m
+LEFT JOIN photo_assets a ON a.id = COALESCE(m.coverAssetId,
+                (SELECT id FROM photo_assets
+                  WHERE isHidden = 0 AND yearMonth = m.yearMonth
+                  ORDER BY assetDate DESC, id ASC LIMIT 1))
+WHERE m.yearMonth BETWEEN :fromYearMonth AND :toYearMonth
+ORDER BY m.yearMonth DESC
+```
+
+`COALESCE` 子查询是**兜底彩蛋**：即使 `coverAssetId` 还是 `null`（A 未生效或尚未重扫），
+打开小窗也能立刻拿到该月最新一张照片。命中 `(yearMonth, assetDate, id)` 索引且 `LIMIT 1`，
+十二行查询耗时不到 1 ms —— **这让修复不再依赖一次耗时几分钟的全盘扫描。**
+
+#### 2. `MonthScanEngine`：保留 `coverAssetId`
+
+```kotlin
+private suspend fun refreshMonthIndex(yearMonth: Int) {
+    if (yearMonth <= 0) return
+    val aggregate = photoDao.monthAggregate(yearMonth) ?: return
+    if (aggregate.itemCount <= 0) {
+        monthIndexDao.deleteMonth(yearMonth)
+        return
+    }
+    val walkFinished = scanStateDao.get(ScanStateEntity.KEY_MONTH_SCAN)?.isComplete == true
+
+    // 保留已有封面；没有才去查（一次带索引的 LIMIT 1，成本可忽略）
+    val existingCover = monthIndexDao.get(yearMonth)?.coverAssetId
+    val cover = existingCover
+        ?: if (appSettings.monthCoverEnabled.value) photoDao.newestInMonth(yearMonth)?.id else null
+
+    monthIndexDao.upsert(
+        PhotoMonthIndexEntity(
+            yearMonth = yearMonth,
+            itemCount = aggregate.itemCount,
+            firstAssetDate = aggregate.firstAssetDate ?: 0L,
+            lastAssetDate = aggregate.lastAssetDate ?: 0L,
+            isComplete = walkFinished,
+            coverAssetId = cover
+        )
+    )
+}
+```
+
+#### 3. `MonthCoverModel`：放宽“能不能画”的判据
+
+```kotlin
+val isVideo = row?.coverMediaType == "VIDEO" || row?.coverMediaType == "LIVE_PHOTO"
+
+when {
+    !hasPhotos -> MonthCoverCell.Unavailable(yearMonth, label)
+
+    // 视频必须有 thumbUrl，否则绝不能把 mp4 当 JPEG 喂给解码器（AGENTS §6.7.5c）
+    row?.coverAssetId == null -> MonthCoverCell.Placeholder(yearMonth, label)
+    isVideo && row.coverThumbUrl.isNullOrBlank() -> MonthCoverCell.Placeholder(yearMonth, label)
+
+    else -> MonthCoverCell.Cover(
+        yearMonth = yearMonth,
+        label = label,
+        coverId = row.coverAssetId,
+        coverMasterId = row.coverMasterId.orEmpty(),   // 配合 C
+        coverUrl = row.coverThumbUrl.orEmpty()         // 允许为空，拦截器会换链
+    )
+}
+```
+
+数据层修好后，`coverRows` 一定带 `coverId`；`coverUrl` 为空是**正常状态**（URL 只是快照），
+不该因此放弃渲染 —— 拦截器会拿 `masterId` 现场换链。
+
+### 验证结果
+
+| 项 | 结果 |
+| --- | --- |
+| `MonthCoverModelTest` | 全绿，含「有 `coverId` 但 `thumbUrl` 为空 → 仍产出 `Cover`」 |
+| `MonthIndexModelTest` | 全绿 |
+| 实机开小窗 | 十二格封面恢复，点选跳转正常 |
+| 冷启动回读（下一批扫描覆盖后） | `coverAssetId` 不再被重置为 `null` |
+
+### 经验教训
+
+> [!IMPORTANT]
+> **“数据层为空”与“渲染层没画”必须先用日志分开，别一次改完再跑。**
+> 打开小窗时输出 `coverRows.size` / `count { it.coverAssetId != null }` /
+> `count { !it.coverThumbUrl.isNullOrBlank() }`，三个数字直接定位断在哪段。
+> 本次之所以反复“修完仍空白”，就是因为每轮都只验证了渲染结果，没验证中间量。
+
+> [!CAUTION]
+> **任何 `photo_month_index` 的 upsert 都必须显式带上 `coverAssetId`。**
+> `@Insert(REPLACE)` 是整行覆盖，漏一列就等于主动把已填好的值清空。
+> 这条已写入 [AGENTS §6.6](AGENTS.md#66-月分组数据层约定) 的硬规则③。
+
+## ISS-039：Phase 3 本地相册后台自动备份与零内存流式上传工程落地
+
+**归属**：Go 核心层 (`go-core/upload.go`) + Android 全链路 (`PhotoRepository` / `PhotoBackupWorker` / `upload_queue`)
+**完成时间**：Phase 3
+
+### 问题背景与架构死锁消除
+
+在 Phase 3 本地相册自动备份实现中，审查报告指出并彻底修复了 5 项核心 P0/P1 级工程漏洞：
+
+1. **查重时序死锁 (P0)**：
+   - 上传前无法预先得知苹果 MMCS 服务端接收文件后返回的 21 字节 `fileChecksum`。
+   - **修复**：采用两阶段查重。前置基于 `localSha256` 查本地 `upload_queue` 表；后置在流式上传拿到 `fileChecksum` 后，先查 `photo_assets.masterId`。若已存在，跳过 `/records/modify`。
+2. **全盘扫描对账误删 (P0)**：
+   - 增量同步拉回新资产或上传入库时，若检测到后台全盘扫描处于未完结状态，同步向 `scan_seen_ids` 临时表插入 `(id, masterId)`，避免新照片被 `Reconcile` 引擎判为“离线删除”而误删。
+3. **`PCS-Photos` 鉴权强校验 (P0)**：
+   - 强制校验 `X-APPLE-WEBAUTH-PCS-Photos` Cookie，无写凭证时挂起上传。
+4. **Android Scoped Storage 零内存 FD 传输通道 (P1)**：
+   - Kotlin 使用 `openFileDescriptor(uri, "r")?.detachFd()` 获取整型 FD 传给 Go 层，结合 `os.NewFile` 实现 **100% 零内存开销**的流式上传，并结合 `setRequireOriginal` 保证 GPS 坐标不丢失。
+5. **Room 数据库 v9 迁移 (`upload_queue`) 与登出隔离**：
+   - 新增 `upload_queue` 表，`PhotoRepository.wipeAllData()` 集成清空队列逻辑，`isWiping` 哨兵位阻断并发任务。
+
+### 验证结果
+
+| 测试项 | 结果 |
+| --- | --- |
+| `go test -v ./...` | **221 passed** |
+| `:app:testDebugUnitTest` | **221 passed** |
+| `RoomMigrationTest` (Room v8 → v9) | **1 PASSED** (真机 `RFGL71AVC3V`) |
+| `UploadPipelineTest` (真机全链路) | **1 PASSED** (真机 `RFGL71AVC3V`) |
+
+
+
+
+
+---
+
+## ISS-040：上传的照片和视频在 Apple 端全部不可渲染
+
+**优先级**：🔴 P0（Phase 3 上传功能的核心可用性）
+**归属**：Go 核心层 — `../go-core/upload.go`、`metadata_build.go`、`movie_proxy.go`
+**完成时间**：Phase 3.2
+
+### 现象
+
+| 端 | 表现 |
+| --- | --- |
+| iCloud 网页 | 灰块 / 感叹号，信息面板显示「无相机信息」「无镜头信息」 |
+| macOS 照片 App | 缩略图空白，但「分享」能导出原图 |
+| iOS / 其他 Apple 设备 | 同上 |
+| 本 App | 照片正常；视频只有灰底「iCloud」字样（没有封面） |
+
+关键特征：**所有**上传项都坏（不分 JPEG / HEIC / MP4），而同一台手机、同一天、
+用 iCloud 网页上传按钮传的同一张照片却完全正常。
+
+### 诊断过程（两轮推断都被实测推翻）
+
+| 推断 | 结论 |
+| --- | --- |
+| “所有字段没写 `\"type\"`，CloudKit 会推断错类型” | **错**。探针显示 `assetDate`=TIMESTAMP、`resOriginalRes`=ASSETID、`importedBy`=INT64，**全部正确** |
+| “坏 binary plist 是唯一根因” | **错**。视频根本没有 `mediaMetaDataEnc` 字段，却一样坏 |
+
+最终靠**三方记录 diff 探针**一次定因：对「苹果网页上传的」「我们传的照片」「我们传的视频」
+各发一次 `/records/lookup`，**不带 `desiredKeys`**，拿到全字段 + 每个字段的 CloudKit `type`。
+
+> [!IMPORTANT]
+> **排查这类问题禁止靠读代码猜字段。** 本项目的 `CKField.AsInt64()` / `AsResource()` 是宽松解析，
+> 值存错了也照样能读出来 —— 这就是这个 bug 能活到线上的原因。必须用 `desiredKeys` 全开
+> 的 `/records/lookup` 拿服务端真相，并与一条**苹果自己创建的**同格式记录对照。
+
+### 根因（三个独立缺陷叠加）
+
+#### ① `res*FileType` 存了 MIME，Apple 存的是 UTI
+
+这是照片和视频**共同的、唯一「值错」**的字段。
+
+| 字段 | Apple | 修复前 |
+| --- | --- | --- |
+| `resOriginalFileType`（照片） | `public.heic` | `image/heic` |
+| `resOriginalFileType`（视频） | `public.mpeg-4` | `video/mp4` |
+| `resJPEGMedFileType` / `resJPEGThumbFileType` | `public.jpeg` | `image/jpeg` |
+
+**为什么我们永远看不到**：本项目的读取路径完全不碰这几个字段，所以 Android 端一直正常。
+
+#### ② `mediaMetaDataEnc` 是结构性损坏的 binary plist
+
+手写编码器有两个 bug：
+
+| Bug | 说明 |
+| --- | --- |
+| 对象索引整体偏移 1 | `addObject` 从 0 编号子对象，但根字典又被插到下标 0，导致所有引用指向前一个对象 |
+| 偏移表宽度写死 1 字节 | payload > 255 字节时 `buf.WriteByte(byte(off))` 静默截断，而真实 EXIF 恒在 1.4 KB 量级 |
+
+实测：Apple 官方 `plutil` 直接拒解（`Property List error: Unexpected character b`），
+而 Python `plistlib` **不报错**，只把结构读成垃圾（键变成机型名）—— 这比报错更危险。
+
+修复：改用项目已有的 `howett.net/plist`（`metadata_build.go`），并在写入前用同一个库
+`Unmarshal` 自校验，**不通过就不写该字段**（宁可无元数据，绝不写坏字节）。
+
+#### ③ 视频完全没有派生图
+
+原生苹果视频有 `resJPEGThumbRes`（311×553）+ `resJPEGMedRes` + `resOriginalWidth/Height`；
+我们全缺，且 `width=0 height=0`。这同时是我们自己 Android 端那格灰「iCloud」的成因
+（`PhotoGridItem` 的 Coil `error` 槽硬编码了这行字，`thumbUrl` 为空导致必然走 error）。
+
+### 修复清单
+
+| 位置 | 改动 |
+| --- | --- |
+| `upload.go` | `res*FileType` 一律用 UTI（`meta.FileType = meta.ItemType`） |
+| `upload.go` | `assetId` 改为标准 UUID v4（原为 `ASSET-<纳秒>`，还泄漏进网页 URL） |
+| `upload.go` | 补 `CPLMaster` 的 `fullSizeJPEGSource` / `importedBy` / `importGroupId` |
+| `upload.go` | 补 `CPLAsset` 的 `assetSubtypeV2` / `customRenderedValue` / `timeZoneNameEnc` / `timeZoneOffset` |
+| `upload.go` | 视频补 `codec` / `videoFrameRate` |
+| `upload.go` | `/records/modify` 解析 `records[].serverErrorCode`（CloudKit 200 也可能是失败） |
+| `metadata_build.go` | **[NEW]** `CGImageProperties` plist 用 `howett.net/plist` 生成 + 自校验 |
+| `movie_proxy.go` | **[NEW]** 视频 `AVAssetProxy`：抽 `ftyp`+`moov` 盒，`{moop, mpvr, name}` |
+| `PhotoExif.kt` | 图片派生图按 EXIF 方向**物理旋转**（苹果的 med 是 1536×2048 竖版） |
+| `PhotoExif.kt` | 视频首帧派生图（`getFrameAtTime` + 自检测是否需旋转） |
+| `PhotoExif.kt` | `extractVideoInfo`：宽高（含旋转交换）/ 时长 / 帧率 / codec |
+
+### 两个次生问题（本轮一并修）
+
+**派生图过旋转**：`getFrameAtTime` 在很多设备上**已经**应用了容器旋转，再按
+`METADATA_KEY_VIDEO_ROTATION` 转一次就多转 90°。修复方式是不猜 —— 用帧自身的宽高比判断：
+`rotation∈{90,270}` 且帧仍是横向 ⇒ 未旋转过，才转。
+
+**本地上传查重从未实现**：CHANGELOG 上一版声称「后置在拿到 `fileChecksum` 后先查
+`photo_assets.masterId`，命中即跳过 `/records/modify`」，但代码里**没有**这段。
+结果同一文件重复上传会创建第二个 `CPLAsset`（`recordName` 每次新 UUID）指向同一个 `CPLMaster`。
+Apple 客户端按 master 归并所以只显示一条，而我们的网格按 asset recordName 归并 → **只有 App 内重复**。
+
+修复：
+| 层 | 手段 |
+| --- | --- |
+| Go（根治） | 上传前 `masterRecordExists()` 查 `recordName = fileChecksum`，命中就返回 `duplicate: true` 且不建记录 |
+| Room（清账） | `PhotoDao.deleteDuplicateMasterRows()`，`MonthScanEngine` 每次扫描前清理同 masterId 的多余行 |
+| 本地指纹 | Go 回传 `localSha256`，Kotlin 写回 `upload_queue.localSha256`（此前永远是空串，第 1 层查重形同虚设） |
+
+> [!CAUTION]
+> **`CPLMaster.recordName` 就是内容指纹（MMCS `fileChecksum`）。**
+> 任何「同一文件传两次」都会得到同一个 master，但 `CPLAsset` 每次都是新 UUID。
+> 因此**幂等性必须在建记录之前用 lookup 保证**，不能指望服务端去重。
+
+### 验证
+
+| 项 | 结果 |
+| --- | --- |
+| `go test ./...` | ✅ 全绿 |
+| 新增护栏 | `TestBuildMediaMetaDataEncRoundTrip`（结构断言）/ `…LargePayload`（>255B）/ `…OmitsWhenEmpty` / `TestExtractRecordErrors` / `TestExtractMovieProxySkipsMdat` / `TestBuildVideoMetaDataEnc` |
+| `plutil -p` 外部验证 | ✅ 结构 = `{TIFF}` `{Exif}` `{GPS}` `PixelWidth/Height/Depth` |
+| `:app:testDebugUnitTest` | ✅ 221 passed |
+| 实机（`RFGL71AVC3V`） | ✅ 网页 / Mac / App 三端均正常显示 |
+
+### 教训
+
+1. **禁止手写 binary plist / protobuf 等序列化格式**，必须用已有成熟库；写完必须用**外部**解析器验证
+   （同库 round-trip 不够 —— 旧编码器在本进程里也是「成功」的）。
+2. **`/records/modify` 返回 200 不代表成功**，必须查 `records[].serverErrorCode`。
+3. **`res*FileType` 是 UTI，不是 MIME**。
+4. **诊断协议问题必须拿苹果自己创建的记录做对照**，否则分不清「缺字段」与「值不对」。
+
+
+---
+
+## ISS-041：GPS 因 `ACCESS_MEDIA_LOCATION` 从未申请而丢失
+
+### 现象
+
+上传到 iCloud 的照片和视频都没有位置信息，网页端 / Mac / iPhone 的「信息」面板地图为空。
+其余字段（时间、机型、曝光参数、时长）全部正常。
+
+### 根因
+
+`ACCESS_MEDIA_LOCATION` 在 `AndroidManifest.xml` 里声明了，但**运行时从未申请**。
+只声明不申请 = 永远不授予。设备实测：`granted=false`。
+
+不授予时 MediaProvider 会在把字节交给 App 之前抹除位置，实测两种对象两种表现：
+
+| 对象 | 来源 | 授予 | 不授予 |
+| --- | --- | --- | --- |
+| 照片 | `ExifInterface.latLong` | 9 / 60 张有 GPS | **0 / 60** |
+| 视频 | `moov/udta/©xyz` atom 原始字节 | `+35.9553+120.1715/` | **atom 被整个移除**（`findBox` 返回 nil）|
+
+> [!IMPORTANT]
+> 曾误以为「容器原子可以零权限读到」，并用 `adb pull` 得到的文件验证过——那条路径绕过了
+> MediaProvider，所以结论是假的。通过真实 FD 通道重测后证伪：**照片和视频都需要该权限，
+> 没有例外。**
+
+### 为什么权限列表里看不到（用户提问）
+
+```
+group:android.permission-group.UNDEFINED  -->  ACCESS_MEDIA_LOCATION
+```
+
+它属于 **`UNDEFINED` 权限组**，而 Android 设置页按权限组渲染，所以：
+
+| 能力 | 可用 |
+| --- | --- |
+| 运行时弹窗申请 | ✅ |
+| 出现在「权限」列表 | ❌ |
+| 出现在「所有权限」 | ❌ |
+
+后果很实际：拒绝两次后系统静默拒绝（不弹窗、不报错），而设置里又没有入口，**只能重装**。
+因此 UI 必须把这次授权当成一次性决策来解释，而不是一个勾选框。
+
+### 为什么 Google Photos 没申请过
+
+```
+ACCESS_MEDIA_LOCATION: granted=true, flags=[USER_SENSITIVE_WHEN_GRANTED|...]
+```
+
+flags 里**没有 `USER_SET`**，且 `codePath=/data/app/...`（非 privileged）。
+结论：它是 OEM 出厂**预授予**的普通运行时权限，不是 install-time 权限。第三方应用拿不到。
+
+### 修复
+
+| 文件 | 改动 |
+| --- | --- |
+| `LocalAlbumsScreen.kt` | 勾选相册备份时弹解释弹窗；非阻塞提示条；永久拒绝后给「只能重装」说明 |
+| `PhotoRepository.kt` | 内容读取改用 `requireOriginal` URI；日志加 `gps=` / `original=` |
+| `PhotoExif.kt` | `METADATA_KEY_LOCATION` → ISO-6709 解析；`0,0` 视为无坐标 |
+| `metadata_build.go` | `{GPS}` 写入前过滤 `0,0` |
+| `quicktime_meta.go` | 从 `udta/©xyz` 读位置（仍需权限，非绕过） |
+
+### 验证
+
+| 项 | 结果 |
+| --- | --- |
+| 权限对照（60 张照片） | 授予 9 张有 GPS；不授予 **0 张** |
+| 视频 atom 对照 | 授予 `+35.9553+120.1715/`；不授予 `no-xyz-atom` |
+| 弹窗实机 | ✅ 标题「备份时包含照片位置？」，三选项到位 |
+| `:app:testDebugUnitTest` | ✅ 221 passed |
+
+---
+
+## ISS-042：视频拍摄信息在 Apple 与 Android 两端各自看不见
+
+### 现象
+
+- **上传到 iCloud 后**：安卓拍的视频在网页 / Mac 的「信息」面板显示「无相机信息」「无镜头信息」。
+- **从 App 下载回安卓后**：iPhone 拍的视频在三星相册里同样什么信息都没有。
+
+### 根因（两件事，都不是数据丢失）
+
+**(1) Apple 侧**：视频的相机信息**不是 EXIF**，而是 QuickTime `mdta` 元数据。
+真机 iPhone 样本测得：
+
+```
+moov/meta           com.apple.quicktime.make / .model / .software / .creationdate
+                    com.apple.quicktime.location.ISO6709
+moov/trak[0]/meta   camera.lens_model / focal_length.35mm_equivalent / lens_irisfnumber
+```
+
+安卓 MP4 里一个都没有，只有三星私有 `smta` / `auth` / `cami` 与 `com.android.*`——苹果全不认。
+
+**(2) Android 侧**：先核实了「上传是否改动了原文件」，答案是否定的：
+
+```
+本地文件                      = 9353319
+CPLMaster.resOriginalFileSize = 9353319
+```
+
+而且下载回来的 iPhone `.MOV` 逐字节保留了 1660 字节的 `moov/meta`。所以问题不是丢失，而是
+**格式互不识别**：三星相册读 `udta` 原子，苹果写 `moov/meta`。
+
+### 修复
+
+| 文件 | 改动 |
+| --- | --- |
+| `quicktime_meta.go` | 写入端：向 `moop` 注入 `moov/meta`（hdlr+keys+ilst），**替换**而非追加同名盒 |
+| `samsung_meta.go` | 下载端：读 Apple `moov/meta` → 写 `udta/©xyz` + `udta/auth` |
+| `video_codec.go` | `codec` 改为解析 `stsd` sample entry，而非猜 MIME |
+| `MediaStoreDownloader.kt` | `IS_PENDING=1` 期间通过 FD 注入，再发布 |
+
+> [!CAUTION]
+> **`moov` 可能位于 `mdat` 之前**，而 `stbl/stco` 存的是绝对文件偏移。直接增长 `moov` 会
+> 移动全部媒体样本，文件直接播不了。因此注入遵循三条规则：
+> 1. 优先**借用 `moov` 内 `free` 盒的空间**，`moov` 总大小不变 → 任何布局都安全；
+> 2. 无 `free` 可用时，仅当 `moov` 是最后一个顶层盒才增长；
+> 3. 否则拒绝修改并报告原因。
+
+### 验证
+
+| 项 | 结果 |
+| --- | --- |
+| 真实 iPhone `.MOV` 注入 | `{"ok":true,"model":"iPhone SE (3rd generation)","added":["©xyz","auth"],"bytes":0}` |
+| 文件大小 | 16585835 → 16585835（借 `free`，未变）|
+| 时长 | 5615ms → 5615ms（仍可播）|
+| `METADATA_KEY_LOCATION` | `null` → `+35.9553+120.1714/` |
+| 生产顺序（pending→写→注入→发布）| ✅ 同上，发布后仍可读 |
+| `codec` 探测 | 三星 HEVC 样本 → `"HEVC"` |
+| 新增护栏 | `TestDetectVideoCodec`（含**首个 trak 是音频**陷阱）/ `TestInjectQuickTimeMetadata` / `TestRebuildMoovBorrowingFreeKeepsSize` / `TestNormalizeISO6709` 等 |
+
+### 端到端实机确认（三星相册信息面板）
+
+下载回来的 iPhone 视频，三星相册现在显示：
+
+```
+2026年10月26日星期一 · 20:07
+IMG_2127.MOV
+内部存储/Movies/iClouDroid
+iPhone SE (3rd generation)        ← udta/auth 生效
+16.98 MB | 1080x1920 | FHD
+0:07 | HEVC | AAC | 60fps
+[地图] 山东省,青岛市,黄岛区,富春江路,202号,中国   ← udta/©xyz 生效
+```
+
+> [!NOTE]
+> `auth` 原子被三星正确渲染为机型名——这一条在实现时是**不确定**的（只有一个样本，
+> 无法确认它是不是只在自家机型上被读）。现已实测确认，`iPhone SE (3rd generation)`
+> 是三星相册从我们写入的 `auth` 里读出来的。
+>
+> 仍缺的是「广角镜头 - 23毫米」那一行，对应 `udta/smta`。
+
+
+### `udta/smta` 的解出过程（三个焦段样本）
+
+第一次只有一个样本，无法区分「常量」与「变量」，所以没写。后续用三个焦段重拍后解出：
+
+| 文件 | `cami`（ASCII，无需猜测）| `smta` 尾部 | 含义 |
+| --- | --- | --- | --- |
+| `20261026_215300` | `3, 3, 1954, 534, 0.6` | `3, 13, 13` | 超广角 0.6x |
+| `20261026_215309` | `3, 2, 2328, 206, 1.0` | `2, 23, 23` | 主摄 1.0x |
+| `20261026_215317` | `3, 4, 2452, -198, 3.0` | `4, 69, 69` | 长焦 3.0x |
+
+推导链：
+
+1. `cami` 第 2 个值 == `smta` 尾部第 1 字节（4/4 一致）→ 那是 **lens id**。
+2. 尾部数值满足 23 × 0.6 ≈ 13、23 × 3 = 69 → 那是 **35mm 等效焦距**。
+3. 51 字节里 **只有索引 46、48、50 变化**，0..45 在四个样本中逐字节一致 →
+   可以用模板 + 定点补丁的方式复现，不需要完全弄懂分帧格式。
+4. 索引 49 恒为 0，所以 `48` 与 `50` 两个字节同时写焦距值即可。
+
+> [!NOTE]
+> Samsung 自己的 `smta` 是 51 字节，但末尾字段的宽度暗示 52——即它自己写短了 1 字节。
+> 我们**原样复现这个 off-by-one**，而不是「修正」它：针对 Samsung 自身输出调过的
+> 读取器可能依赖它写出去的那个形状。
+
+### 验证
+
+| 项 | 结果 |
+| --- | --- |
+| 三个真实设备文件 | `buildSmtaBox` 输出与文件内 `smta` **逐字节一致** |
+| iPhone 注入 | `{"ok":true,"added":["©xyz","auth","smta"],"bytes":0}` |
+| 焦距 | iPhone SE → `lensId=2`, `29mm` |
+| 文件大小 / 时长 | 16585835 → 16585835；5615ms → 5615ms |
+| 生产顺序（pending→注入→发布）| ✅ 同上 |
+
+### 已知残留
+
+| 项 | 原因 |
+| --- | --- |
+| `udta/cami` | payload `"3, 2, 2192, 534, 1.0"` 语义未明（第 3/4 值含负数），不伪造 |
+| `mdln` 写入 `Apple` 而非 Samsung 代号 | 描述的是 Apple 拍摄，写 `SM-F9760` 是假的。面板机型行来自 `auth`（已证实），所以 `mdln` 不影响显示；但若 Samsung 校验该字段，`smta` 可能被整体忽略——**待目视确认** |
+| 非三星安卓设备 | `auth`/`smta` 是三星私有格式，小米/Pixel/OPPO 不读。无跨厂商标准可循 |
+| 镜头焦距 > 255mm | 字段只有 1 字节，写入会变成错数字，因此**拒绝写入**而不是截断 |
+| `resVidMedRes` / `resVidSmallRes` | 服务端转码产物，客户端无法生成。影响仅是首播需下原片 |
+
+### 教训
+
+1. **先证明「数据有没有丢」，再改代码。** 这次差点为一个不存在的数据丢失问题去写转码器。
+2. **同一逻辑在路径与 FD 两种入口下都要测。** `*os.File` 被 net/http 关闭、
+   `requireOriginal` 在 FD 阶段才抛异常——都是单位测试照不出来的。
+3. **二进制格式没有两个样本就不要动手写。** 写错比不写更糟，而且更难排查。
+
+---
+
+## ISS-043：照片有 `{GPS}` 但网页不显示地图
+
+### 现象
+
+照片在 `DCIM/Camera` 下、带定位。App 自己的信息卡**能正常显示坐标**（`36.021177, 120.087267`），
+但 iCloud 网页端「信息」面板只有「添加位置」按钮，没有地图。
+
+### 排查：先确认坐标到底写进记录没有
+
+关键推理：App 信息卡的坐标来自 `PhotoInfoCard` 的 `exif?.gps`，而那是解析**服务器记录的
+`mediaMetaDataEnc`** 得到的 —— 不是读本地文件。所以 App 能显示 = **`{GPS}` 确实已写入服务端**。
+
+随后用 `/records/lookup`（不带 `desiredKeys`）逐字段对比原生 Apple 记录与我们的：
+
+```
+原生 IMG_2123.HEIC  {GPS}: 15 个键，Latitude=35.95533, Longitude=120.171417
+我们 20261011_105213 {GPS}:  5 个键，Latitude=36.021177, Longitude=120.087267
+```
+
+两边的 `{GPS}` 都是合法且正确的。所以问题不在 `mediaMetaDataEnc`。
+
+### 根因
+
+对比 `CPLAsset` 字段集，原生有而我们完全没有的是 **`locationEnc`**：
+
+```
+原生: locationEnc  ENCRYPTED_BYTES  YnBsaXN0MDDYAQIDBAUGBwgJCgsMCg0OD1Zjb3Vyc2U...
+我们: （字段不存在）
+```
+
+解码后是一个序列化的 `CLLocation`（binary plist，187 字节）：
+
+| 键 | 含义 |
+| --- | --- |
+| `lat` / `lon` | 纬度 / 经度 |
+| `alt` | 海拔（米）|
+| `course` | 罗盘方位（度）|
+| `speed` | 速度（m/s）|
+| `horzAcc` / `vertAcc` | 水平 / 垂直精度（米）|
+| `timestamp` | **plist `<date>` 类型**，不是字符串 |
+
+结论：`{GPS}` 是 **EXIF 视角**的位置，`CPLAsset.locationEnc` 才是**照片库自己的位置索引**，
+而网页地图读的是后者。
+
+> [!IMPORTANT]
+> **两个字段缺一不可。** 只写 `{GPS}` 时：
+> - 我们的 App：✅ 能显示坐标（因为它读 `mediaMetaDataEnc`）
+> - iCloud 网页 / Mac / iOS：❌ 无地图
+>
+> 这个不对称正是问题长期没被发现的原因：唯一的反馈回路（自己的 App）恰好验证了错的那一半。
+
+### 修复
+
+新增 `go-core/location_enc.go`，`BuildLocationEnc(lat, lon, alt, course, speed, hAcc, vAcc, ts)`，
+写入 `CPLAsset.locationEnc`（照片与视频都写，与 Apple 一致）。
+
+**`timestamp` 必须是真正的 plist `<date>`**。写成字符串会让接收端解出错误的类，
+所以在自校验里专门断言：
+
+```go
+if _, ok := verify["timestamp"].(time.Time); !ok {
+    return ""   // 类型不对宁可不发
+}
+```
+
+### 验证
+
+| 项 | 结果 |
+| --- | --- |
+| 与原生 payload 对比（Python `plistlib` 独立解析）| 键集完全一致，类型完全一致（7 float + 1 datetime）|
+| `0,0` 处理 | 拒绝（不把照片钉在几内亚湾）|
+| 单轴为 0 | 接受（赤道 / 本初子午线上的照片不能被丢）|
+| 新增护栏 | `TestLocationEncMatchesAppleShape` / `…RejectsOrigin` / `…AcceptsSingleAxisZero` / `…DefaultsTimestamp` |
+| `go test ./...` | ✅ 全绿 |
+| `:app:testDebugUnitTest` | ✅ 221 passed |
+| 实机 | ✅ 新上传照片在网页端出现地图 |
+
+### 教训
+
+1. **拿真实同类记录做逐字段 diff，不要拿“我们的客户端能读”当验证。**
+   这次同一张照片同时存在两个位置字段，自己读对了自己写的那一半，掩盖了真正要写的那一半。
+   原生的 `CPLAsset`/`CPLMaster` 全字段集应该在任何新字段上线前就跑一次对比。
+2. **plist 里的类型不只是形状。** `<date>` vs `<string>` 在十六进制层面差别很小，
+   在客户端行为上差别很大。自校验要断言类的身份，不能只看键存在。
+
+### 已知残留
+
+| 项 | 说明 |
+| --- | --- |
+| `{GPS}` 只有 6 个键 | 苹果写 15 个。**其中 9 个在安卓源文件里就不存在**：直解三星 HEIC 的 EXIF GPS IFD，只有 `Latitude` / `LatitudeRef` / `Longitude` / `LongitudeRef` / `Altitude` / `AltitudeRef` 六个 tag，没有 `TimeStamp` / `DateStamp` / `Speed` / `ImgDirection` / `DestBearing` / `HPositioningError`。三星相机只记 6 个，苹果相机记 15 个——不是我们漏了 |
+| `AltitudeRef` | ✅ 已补。`{GPS}` 的海拔是「**非负绝对值 + 符号标记**」：`Altitude` 为 float，`AltitudeRef` 为 **int**（0 海平面上、1 海平面下）。旧代码直接写带符号的值且不带 ref，使得死海（-430 m）读回 +430 m |
+| `course` / `speed` / `horzAcc` / `vertAcc` 固定 0 | EXIF 不提供。精度值错误只会放大不确定圈，不会移动图钉 |
+| 已上传的旧照片 | 幂等查重（`masterRecordExists`）会跳过，不会自动补 `locationEnc`；需删除重传 |
+| 其余 `CPLAsset` 字段 | 原生还有 `assetSubtype` / `assetHDRType` / `burstFlags` / `mostRecentAddedDate` 等，本次未涉及，待单独评估 |
+
+> [!NOTE]
+> **仰望未来：源文件是 iPhone 拍的 HEIC 时，那 9 个键是可透传的**（苹果相机自己会写）。
+> 现在不做，是因为安卓源文件里根本没有这些数据，写一堆只对 iPhone 源文件生效的分支性价比低。
+
+### `{GPS}` 两个 payload 的海拔语义不一致（易错点）
+
+| 字段 | 类型 | 符号 |
+| --- | --- | --- |
+| `{GPS}.Altitude` + `AltitudeRef` | float + **int** | 绝对值 + 标记位 |
+| `locationEnc.alt` | float | **有符号**（`CLLocation.altitude`）|
+
+两者不能归一化处理。护栏：`TestGpsAltitudeAboveSeaLevel` / `…BelowSeaLevel` / `…ZeroIsAbove` / `TestLocationEncKeepsSignedAltitude`。

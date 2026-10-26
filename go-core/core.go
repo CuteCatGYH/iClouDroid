@@ -35,9 +35,10 @@ func GetSessionStateSummary() string {
 		"ckDatabaseURL":  s.CKDatabaseURL,
 		"cookieCount":    len(s.CookieMap),
 		"cookieNames":    cookieKeys,
-		"hasAuthToken":   s.CookieMap["X-APPLE-WEBAUTH-TOKEN"] != "",
-		"hasHsaTrust":    s.CookieMap["X-APPLE-WEBAUTH-HSA-TRUST"] != "",
-		"hasPcsCloudKit": s.CookieMap["X-APPLE-WEBAUTH-PCS-CloudKit"] != "",
+		"hasAuthToken":   s.HasCookieIgnoreCase("X-APPLE-WEBAUTH-TOKEN"),
+		"hasHsaTrust":    s.HasCookieIgnoreCase("X-APPLE-WEBAUTH-HSA-TRUST"),
+		"hasPcsCloudKit": s.HasCookieIgnoreCase("X-APPLE-WEBAUTH-PCS-CloudKit"),
+		"hasPcsPhotos":   s.HasCookieIgnoreCase("X-APPLE-WEBAUTH-PCS-Photos"),
 	}
 	bytes, _ := json.Marshal(summary)
 	return string(bytes)

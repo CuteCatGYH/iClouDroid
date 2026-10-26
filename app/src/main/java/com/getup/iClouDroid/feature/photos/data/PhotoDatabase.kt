@@ -18,6 +18,8 @@ import com.getup.iClouDroid.feature.photos.data.db.ScanStateDao
 import com.getup.iClouDroid.feature.photos.data.db.ScanStateEntity
 import com.getup.iClouDroid.feature.photos.data.db.SyncStateDao
 import com.getup.iClouDroid.feature.photos.data.db.SyncStateEntity
+import com.getup.iClouDroid.feature.photos.data.db.UploadQueueDao
+import com.getup.iClouDroid.feature.photos.data.db.UploadQueueEntity
 
 /**
  * Photos-only database.
@@ -33,9 +35,10 @@ import com.getup.iClouDroid.feature.photos.data.db.SyncStateEntity
         PhotoMonthIndexEntity::class,
         ScanStateEntity::class,
         ScanSeenIdEntity::class,
-        PurgedIdEntity::class
+        PurgedIdEntity::class,
+        UploadQueueEntity::class
     ],
-    version = 8,
+    version = 9,
     exportSchema = false
 )
 abstract class PhotoDatabase : RoomDatabase() {
@@ -46,6 +49,7 @@ abstract class PhotoDatabase : RoomDatabase() {
     abstract fun scanStateDao(): ScanStateDao
     abstract fun scanSeenIdDao(): ScanSeenIdDao
     abstract fun purgedIdDao(): PurgedIdDao
+    abstract fun uploadQueueDao(): UploadQueueDao
 
     companion object {
         /**
@@ -185,6 +189,36 @@ abstract class PhotoDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v8 → v9: background upload queue table (Phase 3).
+         *
+         * Purely additive. Starts empty.
+         */
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `upload_queue` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `mediaStoreUri` TEXT NOT NULL,
+                        `filename` TEXT NOT NULL,
+                        `mimeType` TEXT NOT NULL,
+                        `fileSize` INTEGER NOT NULL,
+                        `localSha256` TEXT NOT NULL,
+                        `status` TEXT NOT NULL,
+                        `retryCount` INTEGER NOT NULL DEFAULT 0,
+                        `lastError` TEXT,
+                        `createdAt` INTEGER NOT NULL,
+                        `updatedAt` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_upload_queue_mediaStoreUri` ON `upload_queue` (`mediaStoreUri`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_upload_queue_localSha256` ON `upload_queue` (`localSha256`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_upload_queue_status` ON `upload_queue` (`status`)")
+            }
+        }
+
         @Volatile
         private var INSTANCE: PhotoDatabase? = null
 
@@ -209,7 +243,8 @@ abstract class PhotoDatabase : RoomDatabase() {
                         MIGRATION_4_5,
                         MIGRATION_5_6,
                         MIGRATION_6_7,
-                        MIGRATION_7_8
+                        MIGRATION_7_8,
+                        MIGRATION_8_9
                     )
                     .build()
                 INSTANCE = instance

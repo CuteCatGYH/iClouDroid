@@ -183,7 +183,7 @@ Go 结构体的零值（`false` / `""` / `0`）与"业务合法值"无法区分�
 
 | 写回路径 | 触发时机 | 后果 |
 | --- | --- | --- |
-| `PhotoRemoteMediator.load()` → `upsertAll()` | 飞行中的 APPEND 在 `clearAll()` 之后落库 | 旧账号照片行被重新写回 |
+| `MonthScanEngine` / `syncIncremental` / `UploadWorker` → `upsertAll()`<br>（历史案例中的执行者原为已删除的 `PhotoRemoteMediator`，见 [ISS-027](CHANGELOG_ISSUES.md#iss-027-paging-3-remotemediator-导致深翻页跳顶改用月分组本地分页根治)） | 飞行中的分批写入在 `clearAll()` 之后落库 | 旧账号照片行被重新写回 |
 | `ICloudWebView` Cookie 探针 → `onCookiesExtracted()` → `saveSession()` | `removeAllCookies` 完成前读到旧 Cookie | 会话被原地重建，`shared_prefs` 保留凭证 |
 
 **为什么 `AuthUiState` 挡不住**
@@ -669,10 +669,20 @@ RuntimeException: setDataSource failed: status = 0xFFFFFFEA
 | `CancellationSignal` 触发就该停手 | 停了就永久空白，**已下字节也不该删** |
 | 超时返回 null 比阻塞好 | 空白格比等 1 秒严重得多 |
 
-### 21.4 MIME 描述的是“你返回的字节”，不是“原始媒体”
+### 21.4 MIME 既决定分类也决定解码器（视频行 `onOpenPreview` 必须返回视频容器）
 
-这条与官方文档字面相反，以实测为准。详见
-[AGENTS §6.7.3](AGENTS.md#673-mime-必须描述onopenpreview-返回的字节)。
+`MIME_TYPE` 在契约里同时被用来**给条目分类**（照片/视频、时长角标、筛选）和**给格子选解码器**。
+对照片两者一致；对视频它们直接冲突：
+
+| 报什么 | 分类 | 格子 |
+| --- | --- | --- |
+| `video/mp4` | ✅ 视频 | ❌ `VideoDecoder` 去解我们返回的 JPEG，`setDataSource failed: 0xFFFFFFEA` |
+| `image/jpeg` | ❌ 变成照片 | ✅ 能解 |
+
+**正确做法是把两件事拆到各自的字段上**：`MIME_TYPE` 报**真实媒体类型**（`video/*`），
+由 `onOpenPreview` 履行契约另一半 —— 视频行返回**真实视频容器**字节，`VideoDecoder` 才有帧可抓。
+切勿为了迁就 JPEG 缩略图而篡改 `MIME_TYPE`（那正是“视频被显示为图片”的成因）。
+详见 [AGENTS §6.7.3](AGENTS.md#673-mime-既决定分类也决定解码器两者对视频冲突)。
 
 ### 21.5 元数据修正必须 bump 版本号
 

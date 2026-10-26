@@ -70,7 +70,12 @@ object MediaStoreDownloader {
                 photo.filename.endsWith(".mov", ignoreCase = true)
 
             // If it is a Live Photo and we have videoComplUrl, save as a single Motion Photo file!
-            if (isLivePhoto && !videoComplUrl.isNullOrBlank()) {
+            //
+            // `!isVideo` is load-bearing: packing appends a video into a JPEG-shaped container.
+            // Run on an actual movie it would produce a file that is neither a valid JPEG nor a
+            // playable video. `isLivePhoto` is inferred partly from `videoComplUrl` being present,
+            // so a movie that ever carried one would land here and be destroyed.
+            if (!isVideo && isLivePhoto && !videoComplUrl.isNullOrBlank()) {
                 Log.i(TAG, "Downloading Live Photo as single Motion Photo for ${photo.filename}...")
                 val motionResult = downloadLivePhotoMotionPhoto(
                     context = context,
@@ -291,7 +296,16 @@ object MediaStoreDownloader {
         ) {
             connection.disconnect()
             val refreshed = repository.refreshUrlsForMaster(masterId, force = true).getOrNull()
-            val newUrl = if (isVideo) refreshed?.videoComplUrl else (refreshed?.originalUrl ?: refreshed?.medUrl)
+            // `videoComplUrl` is the video **paired with a Live Photo**, not the movie itself.
+            // Preferring it for any video would, the day a clip arrives carrying one, hand the
+            // caller a completely different file (a few seconds of motion instead of the
+            // recording). It only ever resolved to null before because ordinary videos never
+            // have one - correct by accident, not by construction.
+            val newUrl = if (isVideo) {
+                refreshed?.originalUrl ?: refreshed?.videoComplUrl
+            } else {
+                refreshed?.originalUrl ?: refreshed?.medUrl
+            }
             if (!newUrl.isNullOrBlank()) {
                 currentUrl = newUrl
                 connection = (URL(currentUrl).openConnection() as HttpURLConnection).apply {
@@ -442,8 +456,10 @@ object MediaStoreDownloader {
             Log.w(TAG, "URL returned ${connection.responseCode}, refreshing URL for master=$masterId...")
             connection.disconnect()
             val refreshed = repository.refreshUrlsForMaster(masterId, force = true).getOrNull()
+            // Same reasoning as in fetchUrlBytes: `originalUrl` first for videos. `videoComplUrl`
+            // is a Live Photo's paired clip, so putting it first would download the wrong bytes.
             val newUrl = if (isVideo) {
-                refreshed?.videoComplUrl ?: refreshed?.originalUrl
+                refreshed?.originalUrl ?: refreshed?.videoComplUrl
             } else {
                 refreshed?.originalUrl ?: refreshed?.medUrl ?: refreshed?.thumbUrl
             }
@@ -483,6 +499,31 @@ object MediaStoreDownloader {
             inStream?.close()
             outStream?.close()
             connection.disconnect()
+        }
+
+        // Translate Apple's QuickTime metadata into Android-readable `udta` atoms.
+        //
+        // An iPhone clip round-trips byte-identically (verified against `resOriginalFileSize`), so
+        // nothing was ever lost - it is just in a form Android does not read. Apple keeps capture
+        // info in `moov/meta` (`hdlr`+`keys`+`ilst`); Samsung Gallery and MediaStore look at
+        // `udta` atoms instead, which is why a perfectly intact clip shows no camera and no
+        // location after download.
+        //
+        // Done while `IS_PENDING` is still 1: the file is on disk but hidden from other apps, so
+        // the first reader to see it already sees the patched bytes.
+        //
+        // Failure is logged and swallowed. A missing `auth` atom shows an empty camera field,
+        // whereas aborting the download would lose the user's video.
+        if (isVideo) {
+            try {
+                resolver.openFileDescriptor(uri, "rw")?.use { pfd ->
+                    val report = com.getup.icloudcore.Icloudcore
+                        .injectAndroidVideoMetadataFD(pfd.detachFd().toLong())
+                    Log.i(TAG, "android metadata for $filename: $report")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "android metadata injection failed for $filename", e)
+            }
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

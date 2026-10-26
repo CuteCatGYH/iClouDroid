@@ -84,6 +84,12 @@ Android 层细分见第 10 节。
    Go 函数返回 `(result, error)` 时，`gomobile` 会将其转化为 Java/Kotlin 中的 `throws Exception`。请在 Kotlin 协程体中总是使用 `try-catch` 包裹调用。
 4. **大文件传输禁忌**：
    **绝对不要**用 `[]byte` 传递照片或视频内容，会触发 Android JNI OOM！必须在 Kotlin 传递文件路径，由 Go 直接读写本地文件流。
+5. **禁止手写序列化格式（ISS-040 血泪教训）**：
+   binary plist / protobuf / ISO-BMFF 这类格式**必须**用已有成熟库（本项目已有 `howett.net/plist`），
+   禁止手写字节。**写完之后必须用外部解析器验证**（macOS `plutil -p`），
+   **同库 round-trip 不够** —— 旧的手写 bplist 编码器在本进程里测也是「成功」的，
+   而 `plutil` 直接拒解、Python `plistlib` 则静默返回垃圾结构。
+   任何编码失败必须**省略该字段**，绝不写入可疑字节。
 
 ---
 
@@ -123,9 +129,28 @@ Android 层细分见第 10 节。
    > 任何展示层必须按字段存在性条件渲染。只判断“有无位置”时用 `CPLAsset.locationEnc`，
    > 不必解码整个 plist。
 
-6. **上传查重直接用 `resOriginalFingerprint`（已实测）**：
-   Apple 已为原图/中图/缩略图各存了一份指纹字段，**不需要自己计算文件哈希**。
-   Phase 3 的查重就是一次 `/records/query` 比对 fingerprint。
+6. **上传查重是两阶段：本地指纹索引 + 云端 `lookup` 兜底（Round 2 探针实测）**：
+   先把两个“哈希”彻底分开 —— 它们长得像，用途完全不同：
+
+   | 哈希 | 长度 | 来源 | 用途 |
+   | --- | --- | --- | --- |
+   | **SHA-256** | 32 字节 / 44 字符 Base64（`=` 结尾） | 客户端自己算 | 仅作 `/assets/upload` 申请上传令牌的**签名** |
+   | **MMCS `fileChecksum`** | 21 字节 / 28 字符 Base64（`A` 开头，首字节 `0x01`） | 上传完成后由服务端返回 | **这才是 `resOriginalFingerprint`，也等于 `CPLMaster.recordName`（`masterId`）** |
+
+   实测铁律：**`masterId == resOriginalFingerprint == receipt.singleFile.fileChecksum`**。
+   所以 `/records/modify` 建 `CPLMaster` 时 `recordName` 必须填 `fileChecksum`，
+   **不能填 `/assets/upload` 返回的那个 UUID**（它只是本次上传会话的票据）。
+
+   查重因此有两条路：
+
+   1. **最优**：在 Go 层实现本地 MMCS 21 字节指纹算法（流式读文件），拿结果直接查
+      `photo_assets.masterId`，零网络；未命中再发一次 `/records/lookup`
+      （`recordName = fingerprint`，`desiredKeys = ["recordName"]`）兜底。
+   2. **退避**：暂不实现本地算法时，维护 `(filePath, fileSize, lastModified, sha256) → masterId`
+      本地映射表。代价是识别不了“其他 Apple 设备已传过同一张原图”。
+
+   结论：**前置查重不能指望云端“现成指纹字段”，必须先在本地建索引；
+   云端只做幂等兜底。** 详见 [docs/REFERENCE.md](REFERENCE.md) §3A.4。
 
 7. **`/records/query` 的 `resultsLimit` 必须 > 1**：
    传 `1` 会直接返回 `400 BAD_REQUEST: Result size limit must be greater than 1`。
@@ -154,6 +179,61 @@ Android 层细分见第 10 节。
 > 调用 `photosBaseURL()` 都会拼出空 host（`unsupported protocol scheme ""`）。
 > 此前未暴露，是因为 Kotlin 层自己读了返回值并存进加密存储。详见 [ISS-029](CHANGELOG_ISSUES.md#iss-029)。
 
+9. **上传记录的字段类型与取值必须逐一对齐真实记录（ISS-040）**：
+
+   | 规则 | 说明 |
+   | --- | --- |
+   | **`res*FileType` 存的是 UTI，不是 MIME** | `public.heic` / `public.jpeg` / `public.mpeg-4`。写 `image/heic` 会让**所有**资源在 Apple 端不可渲染，而我们自己的读取路径根本不碰这几个字段，所以 Android 端一直正常 |
+   | **`/records/modify` 返回 200 不等于成功** | 必须解析 `records[].serverErrorCode`（见 `extractRecordErrors`） |
+   | **上传前必须幂等查重** | `CPLMaster.recordName` **就是**内容指纹（MMCS `fileChecksum`），`masterRecordExists()` 一次 lookup 即可判定。同一文件传两次会得到**同一个 master 但新的 `CPLAsset`** —— Apple 按 master 归并所以只显示一条，我们的网格按 asset recordName 归并 → **只有 App 内重复** |
+   | **视频的 `mediaMetaDataEnc` 是 `AVAssetProxy`** | `mediaMetaDataType = "AVAssetProxy"`，plist 为 `{moop: ftyp+moov 字节, mpvr: 1, name: "<CPLAsset id>.MP4"}`。缺它则**时长显示 0:00**（不是缺派生图导致的） |
+   | **视频必须有 JPEG 派生图** | 缺 `resJPEGThumbRes` / `resJPEGMedRes` 时 Apple 端无 poster frame，本 App 网格也会走 Coil error 槽（那格灰底「iCloud」字样）|
+   | **视频时长在 `CPLAsset.duration`** | 不在 master。写错位置则显示 `0:00`，即使 `moop` 里的 moov 已含真实时长 |
+   | **视频「相机信息」来自 QuickTime `moov/meta`** | `com.apple.quicktime.make` / `.model` / `.software` / `.creationDate` / `location.ISO6709`。不是 EXIF。安卓 MP4 里一个都没有 → 信息面板显示「无相机信息」 |
+   | **`uploadFileToUrl` 会关闭传入的 `*os.File`** | 它作为 `http.NewRequest` 的 body 被 net/http 接管并 Close。**任何后续 `ReadAt` 都会失败**，且失败只表现为「字段缺失」。需在流式上传**之前**抽完 moov。单测里不会暴露（没有上传步骤），见 `TestFileClosedAfterStreamingUpload` |
+
+   > [!CAUTION]
+   > **GPS 需要 `ACCESS_MEDIA_LOCATION` 运行时权限（ISS-041）。照片和视频都需要，无一例外。**
+   > 该权限在 Manifest 里声明了但**从未在运行时申请**，导致 `granted=false`。
+   >
+   > | 对象 | 来源 | 授权 | 不授权 |
+   > | --- | --- | --- | --- |
+   > | 照片 | `ExifInterface.latLong` | 9/60 有 GPS | **0/60** |
+   > | 视频 | `moov/udta/©xyz`（atom 原始字节） | `+35.9553+120.1715/` | **atom 被整个移除** |
+   > | 视频 | MediaStore `LATITUDE/LONGITUDE` | 常为 `null` | `null` |
+   >
+   > 实测结论：MediaProvider 是**删掉** `©xyz` atom（`findBox` 直接返回 nil），
+   > 不是置零。所以**不存在“零权限读视频 GPS”的路径** ——
+   > 之前曾误以为容器原子能绕过，已证伪。
+
+   > [!WARNING]
+   > **`0,0` 必须当作「无坐标」。** 平台抹除位置时会**置零**而非删标签。
+   > 直写会让每张备份照片都钉在几内亚湾。Kotlin 与 Go 两侧都已防护。
+
+   > [!CAUTION]
+   > **排查此类问题禁止靠读代码猜字段。** `CKField.AsInt64()` / `AsResource()` 是**宽松解析**，
+   > 值存错了也照样能读出来 —— 这正是 ISS-040 活到线上的原因。
+   > 必须用 **`desiredKeys` 全开**的 `/records/lookup` 拿服务端真相（含每个字段的 `type`），
+   > 并与一条**苹果自己创建的、同格式的**记录逐字段 diff。
+   > 没有现成工具：临时在 Go 里加一个不带 `desiredKeys` 的 lookup 函数、配一个
+   > `androidTest` 把响应写进 `cacheDir`，用完**立即删除**（`/records/lookup` 的
+   > `desiredKeys` 是白名单，带了它就看不到全部字段）。
+
+   > [!CAUTION]
+   > **位置要写两个字段，缺一不可（ISS-043）。**
+   >
+   > | 字段 | 内容 | 不写会怎样 |
+   > | --- | --- | --- |
+   > | `CPLMaster.mediaMetaDataEnc` 的 `{GPS}` | EXIF 视角的坐标 | 自己的 App 信息卡也没坐标 |
+   > | **`CPLAsset.locationEnc`** | 序列化的 `CLLocation`（binary plist）| **网页 / Mac / iOS 无地图**，自己的 App 却正常 |
+   >
+   > `locationEnc` 的 8 个键：`lat` / `lon` / `alt` / `course` / `speed` /
+   > `horzAcc` / `vertAcc` / `timestamp`。**`timestamp` 必须是 plist `<date>`，
+   > 不是字符串** —— 类型错会让接收端解出错误的类。见 `location_enc.go`。
+   >
+   > 该不对称（自写自读全对、只有网页不显示）正是它长期未被发现的原因：
+   > **“我们的客户端能读”不是验证，拿原生记录逐字段 diff 才是。**
+
 ---
 
 ## 5. 会话生命周期（Session Lifecycle）
@@ -175,7 +255,9 @@ val hasActiveSession = summaryJson.optBoolean("hasAuthToken", false) &&
 
 ### 5.2 会话重建是「昂贵操作」
 
-一次重建 = 一次 `/validate` 网络往返（1~2s）+ **全部已签发 URL 立即作废** + 一次 generation 递增。
+一次重建 = 一次 `/validate` 网络往返（1~2s）+（仅在 `force = true` 恢复路径下）一次 generation 递增。
+注：已签发 URL **不会**因会话重建作废（详见 §4.4 与 [ISS-026](CHANGELOG_ISSUES.md#iss-026)），
+但频繁重建仍会严重拖慢请求并增加限流风险。
 
 > [!WARNING]
 > 任何触发重建的路径都必须极度保守。宁可提示用户「网络错误，请重试」，也不要贸然 `ensureGoSession(force = true)`。
@@ -200,7 +282,8 @@ val hasActiveSession = summaryJson.optBoolean("hasAuthToken", false) &&
 | `SessionManager` | `session_generation` | 持久化的单调递增计数器 |
 | `PhotoAssetEntity` | `sessionGeneration` | 记录入库时打戳 |
 
-判定：`data.sessionGeneration != sessionManager.getSessionGeneration()` → 强制刷新。
+判定：代际已降级为**辅助信号**，仅当「代际不符 **且** URL 年龄已过半（> 6 分钟）」时才提前刷新
+（见 §6.1.1）。刷新成功后仍必须把当前 generation 回写到该行。
 
 > [!CAUTION]
 > 刷新成功后**必须把当前 generation 回写到该行**，否则它永远停留在 stale 状态，每次加载都重复刷新。
@@ -226,7 +309,8 @@ Room 照片表与 Coil 缓存都以 `recordName` 为主键，而这些 ID 属于
 
 1. **阻断** `PhotoRepository.beginWipe()` —— 置 `isWiping = true`，所有网络入口
    （`checkZoneReady` / `fetchInitialPage` / `fetchNextPage` / `syncIncremental` /
-   `refreshUrlsForMaster(s)`）与 `PhotoRemoteMediator.load()` 立即拒绝工作
+   `refreshUrlsForMaster(s)`）与 `MonthScanEngine`（全盘扫描）/ `syncIncremental`（增量同步）/
+   `UploadWorker`（Phase 3 上传）立即拒绝工作
 2. **数据层** `wipeAllData()` —— `sync_state` + `photo_assets` 全清，并清理刷新去重缓存
 3. **图片层** `ICloudImageLoaderFactory.clearCaches()` —— Coil 内存 + 磁盘
 4. **会话层** `clearWebViewCookies()`（桥接回调后 `flush()`）+ `sessionManager.clearSession()`
@@ -234,7 +318,7 @@ Room 照片表与 Coil 缓存都以 `recordName` 为主键，而这些 ID 属于
 
 修改 `logout()` 时注意：
 
-1. **先阻断再清库** —— 否则正在飞行中的 `RemoteMediator` APPEND 会 `upsertAll()`
+1. **先阻断再清库** —— 否则正在飞行中的全盘扫描 / 增量同步 / 上传任务会 `upsertAll()`
    把已删的行写回。
 2. **不能以 `isWiping` 之外的任何方式抑制同步** —— 用同步布尔哨兵位，
    不用 Flow/State（异步会竞态，见 [docs/PITFALLS.md](PITFALLS.md) §7）。
@@ -252,7 +336,8 @@ Room 照片表与 Coil 缓存都以 `recordName` 为主键，而这些 ID 属于
 
 > [!CAUTION]
 > **新增任何「退出登录时需要清理的状态」，同时必须检查它能不能被异步回调写回。**
-> 本项目已验证的写回路径有两条：`PhotoRemoteMediator.load()` → `upsertAll()`，
+> 本项目已验证的写回路径有两条：`MonthScanEngine` / `syncIncremental` / `UploadWorker` →
+> `upsertAll()`（历史案例中的执行者原为已删除的 `PhotoRemoteMediator`，详见 [ISS-027](CHANGELOG_ISSUES.md#iss-027-paging-3-remotemediator-导致深翻页跳顶改用月分组本地分页根治)），
 > 以及 `ICloudWebView` 的 Cookie 探针 → `onCookiesExtracted()` → `saveSession()`。
 
 ---
@@ -344,9 +429,9 @@ Room 照片表与 Coil 缓存都以 `recordName` 为主键，而这些 ID 属于
 > `count == 0` 为假、初始化被跳过。应判断「是否存在未分桶行」（`countUnbucketed()`）。
 
 > [!CAUTION]
-> **月份轻封面（`coverAssetId`）目前仍未修好：小窗里的月份格子可以点、也不置灰，但缩略图为空白。**
-> 详见 [list.md 待修复项](list.md#p2-020月份轻封面缩略图仍为空白)。以下两条是排查中已确认的**硬规则**，
-> 改任何与封面/Coil 相关的代码前必须先读：
+> **月份轻封面（`coverAssetId`）曾因多处数据与渲染断链而空白 —— 已修复，见
+> [ISS-038](CHANGELOG_ISSUES.md#iss-038-年月跳转小窗月份轻封面缩略图空白四层断链修复)。**
+> 以下是排查中确认的**四条硬规则**，改任何与封面/Coil 相关的代码前必须先读：
 >
 > **① 必须显式传 `imageLoader`，否则用的是系统默认 loader。**
 > 本项目的 loader 带 `ICloudPhotoKeyer` + `ICloudPhotoInterceptor` + `ImageDecoderDecoder`，
@@ -365,6 +450,13 @@ Room 照片表与 Coil 缓存都以 `recordName` 为主键，而这些 ID 属于
 > **③ `MonthScanEngine.refreshMonthIndex` 必须保留 `coverAssetId`。**
 > 它每批都 `upsert(PhotoMonthIndexEntity(...))` 且没写 `coverAssetId`，等于每次扫描/冷启动回读
 > 都把已填好的封面重置为 `null`。任何 `photo_month_index` 的 upsert 都必须显式带上该列。
+>
+> **④ DAO 必须查 `a.masterId`，并用 `COALESCE` 兜底封面。**
+> `MonthCoverRow` 少了 `coverMasterId`，`MonthIndexBar` 就只能写 `masterId = ""`，
+> 拦截器 `refreshUrlsForMaster("")` 必然失败 —— 而 `thumbUrl` 只是瞬时快照（签名 ~15min 就失效），
+> 所以「有封面资产但 URL 为空」必须仍能画。正确形态：
+> `COALESCE(m.coverAssetId, (SELECT id FROM photo_assets WHERE isHidden = 0 AND yearMonth = m.yearMonth ORDER BY assetDate DESC, id ASC LIMIT 1)) AS coverAssetId`
+> + `a.masterId AS coverMasterId`，并由 `MonthIndexBar` 把 `masterId = cell.coverMasterId` 透传下去。
 
 ---
 
@@ -913,7 +1005,7 @@ totalDragX > 0  →  右滑  →  上一张
 | Phase 2：照片库拉取、全库月扫描分段、月分组展示与本地缓存（只读预览） | ✅ 完成 |
 | Phase 2.5：双向删除同步、全量对账、设置页与周期扫描 | ✅ 完成 |
 | Phase 2.6：Glimpse 风相册 UI、日/月视图、Monet 主题、本地相册、系统云端媒体提供方 | ✅ 完成（有已知残留）|
-| Phase 3：Android 本地相册自动备份（增量上传） | ⏳ 待开始 |
+| Phase 3：Android 本地相册自动备份（增量上传） | 🟡 进行中 (Phase 3.1 底层已完成，Phase 3.2 备份 UI 与策略开发中) |
 | Phase 4：跨生态深度适配（Motion Photo ↔ Live Photo 单文件打包、EXIF 与旋转对齐） | 🟡 进行中 (下载端已完成) |
 
 ### Phase 2.6 交付清单（本轮 UI 与系统集成）
@@ -949,9 +1041,17 @@ totalDragX > 0  →  右滑  →  上一张
 
 ### Phase 3 关键提醒
 
+> [!TIP]
+> **开工前先读 [docs/REFERENCE.md](REFERENCE.md) 第 3A 节**：那里有逐项核对过的
+> “已知可复用项清单”（哪些直接能用、哪些需扩展、哪些完全缺失），能省掉大量重复探索。
+
 1. **iCloud 上传协议无成熟开源实现**，需参考 [docs/REFERENCE.md](REFERENCE.md) 第 3 节逆向
-2. **上传前必须查重** —— 重复上传会产生幽灵重复照片，无法删除
+2. **上传前必须查重** —— 重复上传会产生幽灵重复照片，无法删除。Round 2 探针已闭环：
+   客户端先算本地 **SHA-256** 去 `/assets/upload` 换 `uploadUrl`，流式上传后由 MMCS 返回
+   21 字节 **`fileChecksum`（= `resOriginalFingerprint` = `masterId`）**。因此查重不能“直接用云端现成字段”，
+   必须先在本地建指纹索引，云端 `/records/lookup` 只做兜底（详见 §4.6）
 3. **上传前校验 `X-APPLE-WEBAUTH-PCS-Photos` Cookie** —— 无此凭证无法写入照片库
+   （当前只校验了 `PCS-CloudKit`，需补上）
 4. **EXIF 时间戳必须准确** —— iCloud 依赖 `assetDate` 排序，写错导致照片乱序
 5. **上传必须走文件路径 + `os.File` 流式**，详见第 3 节第 4 条
 

@@ -30,6 +30,7 @@ const val AUTH_LOG_TAG = "ICloudAuth"
 const val COOKIE_AUTH_TOKEN = "X-APPLE-WEBAUTH-TOKEN"
 const val COOKIE_HSA_TRUST = "X-APPLE-WEBAUTH-HSA-TRUST"
 const val COOKIE_PCS_CLOUDKIT = "X-APPLE-WEBAUTH-PCS-CloudKit"
+const val COOKIE_PCS_PHOTOS = "X-APPLE-WEBAUTH-PCS-Photos"
 
 /**
  * Result of a cookie probe against the iCloud WebView cookie store.
@@ -43,6 +44,7 @@ data class CookieValidationResult(
     val hasAuthToken: Boolean,
     val hasHsaTrust: Boolean,
     val hasPcsCloudKit: Boolean,
+    val hasPcsPhotos: Boolean = false,
     val cookieNames: List<String> = emptyList(),
     val expiresSummary: String? = null
 ) {
@@ -118,6 +120,7 @@ data class CookieValidationResult(
             val hasAuthToken = has(COOKIE_AUTH_TOKEN)
             val hasHsaTrust = has(COOKIE_HSA_TRUST)
             val hasPcsCloudKit = has(COOKIE_PCS_CLOUDKIT)
+            val hasPcsPhotos = has(COOKIE_PCS_PHOTOS)
 
             // A usable session requires the short-lived token AND the PCS-CloudKit key.
             val isValid = hasAuthToken && hasPcsCloudKit
@@ -134,6 +137,7 @@ data class CookieValidationResult(
                 hasAuthToken = hasAuthToken,
                 hasHsaTrust = hasHsaTrust,
                 hasPcsCloudKit = hasPcsCloudKit,
+                hasPcsPhotos = hasPcsPhotos,
                 cookieNames = names,
                 expiresSummary = expiresSummary
             )

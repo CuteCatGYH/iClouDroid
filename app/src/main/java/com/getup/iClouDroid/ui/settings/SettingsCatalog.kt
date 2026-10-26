@@ -39,7 +39,16 @@ enum class SettingsItem {
     CUSTOM_INTERVAL,
 
     /** Bottom navigation bar items visibility toggle. */
-    NAV_BAR_ITEMS
+    NAV_BAR_ITEMS,
+
+    /** Allow cellular data upload for auto-backup. */
+    BACKUP_CELLULAR_DATA,
+
+    /** Require device charging for auto-backup. */
+    BACKUP_REQUIRE_CHARGING,
+
+    /** Require battery not low for auto-backup. */
+    BACKUP_BATTERY_NOT_LOW
 }
 
 /** One titled block of rows. */
@@ -77,6 +86,15 @@ object SettingsCatalog {
             title = "系统整合",
             description = "配置 iClouDroid 与 Android 系统的多媒体生态深度联动。",
             items = listOf(SettingsItem.CLOUD_MEDIA_PROVIDER)
+        ),
+        SettingsGroup(
+            title = "自动备份策略",
+            description = "配置本地相册后台备份时的网络与电量运行约束条件。",
+            items = listOf(
+                SettingsItem.BACKUP_CELLULAR_DATA,
+                SettingsItem.BACKUP_REQUIRE_CHARGING,
+                SettingsItem.BACKUP_BATTERY_NOT_LOW
+            )
         ),
         SettingsGroup(
             title = "照片库",

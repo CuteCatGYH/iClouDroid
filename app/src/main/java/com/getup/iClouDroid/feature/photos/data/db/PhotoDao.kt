@@ -27,6 +27,30 @@ interface PhotoDao {
     @Query("DELETE FROM photo_assets WHERE assetDate <= 0 OR id = masterId")
     suspend fun deleteOrphanRows(): Int
 
+    /**
+     * Deletes duplicate rows that share one `masterId`, keeping the oldest.
+     *
+     * A `CPLMaster.recordName` **is** the MMCS content fingerprint, so two rows pointing at the
+     * same master are the same photo. They arise from uploading one file twice: each upload minted
+     * a fresh `CPLAsset` record name while CloudKit collapsed the masters, so Apple's clients
+     * showed one item and our grid (keyed on the asset record name) showed two.
+     *
+     * Keep the smallest `id`: rows arrive in `assetDate DESC, id ASC` order, so the earliest id is
+     * the one the grid has already been rendering.
+     */
+    @Query(
+        """
+        DELETE FROM photo_assets
+        WHERE masterId IN (
+            SELECT masterId FROM photo_assets GROUP BY masterId HAVING COUNT(*) > 1
+        )
+        AND id NOT IN (
+            SELECT MIN(id) FROM photo_assets GROUP BY masterId
+        )
+        """
+    )
+    suspend fun deleteDuplicateMasterRows(): Int
+
     // ------------------------------------------------------------------------------------
     // Reconciliation (ISS-031)
     // ------------------------------------------------------------------------------------

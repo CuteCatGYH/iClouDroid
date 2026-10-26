@@ -248,3 +248,17 @@ func (s *Session) NewRequest(method, reqURL string, body string) (*http.Request,
 
 	return req, nil
 }
+
+// HasCookieIgnoreCase performs a case-insensitive check for a cookie name in CookieMap.
+func (s *Session) HasCookieIgnoreCase(name string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for k := range s.CookieMap {
+		if strings.EqualFold(k, name) {
+			return true
+		}
+	}
+	return false
+}
+

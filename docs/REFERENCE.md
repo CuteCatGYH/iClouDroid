@@ -64,7 +64,7 @@
 | `recordModificationDate` | date | 记录最后修改时间 |
 | **`mediaMetaDataEnc`** | base64 | **EXIF/GPS 元数据（binary plist）→ 见 2A.2** |
 | **`mediaMetaDataType`** | string | 固定为 `CGImageProperties` |
-| **`resOriginalFingerprint`** | string | **原图指纹 → Phase 3 查重关键** |
+| **`resOriginalFingerprint`** | string | **原图指纹 = `recordName` = MMCS `fileChecksum`**（21 字节 Base64，见 §3A.4） |
 | `resJPEGMedFingerprint` | string | 中图指纹 |
 | `resJPEGThumbFingerprint` | string | 缩略图指纹 |
 | `resOriginalRes` / `resJPEGMedRes` / `resJPEGThumbRes` | ASSETID | 三类资源（见 2A.3） |
@@ -140,7 +140,7 @@ assetDate, masterRef, locationEnc
 | --- | --- | --- |
 | 照片详情面板 | `mediaMetaDataEnc` | ✅ 光圈/快门/ISO/焦距/镜头 + GPS |
 | 列表位置标记 | `CPLAsset.locationEnc` | ✅ 无需解码 plist |
-| **Phase 3 上传查重** | `resOriginalFingerprint` | ✅ **无需自己算指纹** |
+| **Phase 3 上传查重** | 本地指纹索引 + `photo_assets.masterId` + `/records/lookup` | ✅ 已闭环（两阶段，见 §3A.4） |
 | Albums 按来源分类 | `importedByBundleIdentifierEnc` | ✅ 区分拍摄 vs 导入 |
 
 **唯一未解决的工程问题**：Go 标准库没有 binary plist 解析器。
@@ -155,6 +155,119 @@ assetDate, masterRef, locationEnc
 - **参考价值**：由于 `icloudpd` 仅支持下载，上传照片至 iCloud 的 `records/modify` 与 `/assets/upload` (MMCS 对象存储分块上传) 报文结构需参考此类上传工具。
 - **备选方案**：直接通过桌面浏览器在 `icloud.com.cn` 手动上传一张图进行抓包对照。
 - **本项目用途**：Phase 3 流式上传链路
+
+### 本项目已实测通过的端到端上传三步法（Round 2 探针，2026-10）
+
+> **已验证闭环**：端到端返回 `200 OK`，且上传后 `syncIncremental()` 能把新 asset 拉回本地
+> `photo_assets`。**大文件不需要分片**（已实测 16MB 图片与 105MB 视频）。
+
+| 步骤 | 接口 | 关键点 |
+| --- | --- | --- |
+| ① 申令牌 | `POST /assets/upload` | 传本地文件的 **SHA-256**（Base64，44 字符）作 `signature`；返回 `recordName`（UUID，**仅本次会话票据**）与 `singleFileUpload` 直链（`cws.icloud-content.com.cn`） |
+| ② 传字节 | `POST {uploadUrl}`（`application/octet-stream`） | **零内存流式**：`http.NewRequest(POST, uploadUrl, *os.File)` + 显式 `req.ContentLength = fileInfo.Size()`，严禁 `os.ReadFile`/`io.ReadAll`（[PITFALLS §4](PITFALLS.md)）。返回 `receipt.singleFile`（含 `fileChecksum` / `referenceChecksum` / `wrappingKey` / `size`） |
+| ③ 提交记录 | `POST /records/modify` | **同一个 `operations` 数组内原子提交两条 `create`**：先 `CPLMaster`（`recordName` = `receipt.singleFile.fileChecksum`，**不是 UUID**；`resOriginalRes` = `receipt` 对象；`resOriginalFingerprint` = 同一值），再 `CPLAsset`（`masterRef` 指向该 master） |
+
+> [!CAUTION]
+> **只建 `CPLMaster` 不建 `CPLAsset`，照片在任何客户端都不会显示。**
+> 项目在 [ISS-030](CHANGELOG_ISSUES.md#iss-030) 中已严令丢弃“未配对的孤儿 master”，
+> 所以单建 master 等于把照片扔进黑洞。
+
+---
+
+## 3A. Phase 3 已知可复用项清单
+
+> **编写时点**：2026-10，基于 Phase 2 完成后的代码现状逐项核对（非推测）。
+> 开工前请重新确认这些位置未被重构。
+
+### 3A.1 可直接复用（无需改动）
+
+#### Go 协议底座
+
+上传链路的“外壳”全部现成 —— 上传只是换一个 `path` 去请求，Cookie、Header、路由都已解决。
+
+| 能力 | 位置 | 为何可直接用 |
+| --- | --- | --- |
+| `Session.NewRequest` | `go-core/session.go` | 自动注入 Cookie + 匹配区域的 `Origin`/`Referer` |
+| `Session.CookieMap` | `go-core/session.go` | 跨子域手动注入，绕开 `com.cn` 公共后缀问题 |
+| `photosBaseURL(path)` | `go-core/photos.go` | 拼 CloudKit URL（含 `clientId`/`dsid`/`remapEnums`） |
+| `errors.go` 全套 | `go-core/errors.go` | `ClassifyHTTPStatus` / `ClassifyNetErr` + 8 个错误码 |
+| `ExtractAndSaveCookies` | `go-core/session.go` | 上传过程中的 Cookie 轮换会自动保存 |
+| `ClientID` 持久化 | `go-core/session.go` | 上传同样需要稳定 clientId |
+
+#### Android 基础设施
+
+| 能力 | 位置 | 说明 |
+| --- | --- | --- |
+| `ensureGoSession()` | `PhotoRepository` | 会话守卫，上传前必过 |
+| `classifyCoreResponse()` | `PhotoRepository` | 错误分类，**上传错误码必须在此扩展** |
+| `dataMutationMutex` | `PhotoRepository` | 写操作互斥锁，**上传必须共用这把，不得另起** |
+| `isWipeInProgress()` | `PhotoRepository` | 登出守卫，上传中遇到登出要立即放弃 |
+| WorkManager + 前台服务 + 通知 | `feature/photos/work/` | `MonthScanWorker` / `ScanNotificationHelper` / `ScanScheduler` 可直接当模板 |
+| 周期调度 | `PeriodicScanScheduler` | 加个 `ContentObserver` 触发器即可 |
+| Room Migration 范例 | `PhotoDatabase.MIGRATION_3_4` | 新增上传进度表时照抄 |
+| 手写 DI | `AppContainer` | 加个 `lazy` 字段即可 |
+
+### 3A.2 可复用但需扩展
+
+**① binary plist 解析器已存在**
+
+`FetchPhotoMetadata` 内部的 `decodeMediaMetaData` 已能把 `mediaMetaDataEnc` 解成结构化 EXIF/GPS。
+P3 读本地照片 EXIF 时可沿用同一套解析思路（虽然输入源不同）。
+
+**② `MediaStoreDownloader` 是写入方向的现成教材**
+
+它已在做**写 MediaStore**：`ContentValues`、`RELATIVE_PATH`、`IS_PENDING`、
+`DATE_ADDED` / `DATE_MODIFIED` 的用法可直接参考（P3 是反向读，但列名与权限模型一致）。
+
+其中 `copyExifAttributes(srcExif, dstExif)` 说明项目已有 `ExifInterface` 读写经验，
+P3 用它读 `DateTimeOriginal` 正好。
+
+**③ 批量 `/records/lookup` 模式**
+
+`RefreshAssetUrls` 的请求构造、分批、错误处理可照搬到查重场景。
+
+### 3A.3 完全缺失（P3 主体工作量）
+
+| 缺口 | 现状 |
+| --- | --- |
+| **任何写操作能力** | Go 侧**完全没有** `/records/modify`、`/assets/upload`、MMCS 分块上传 |
+| **指纹索引未建立** | `resOriginalFingerprint` 等于 `masterId`，已经以 `photo_assets.masterId` 形式存在；缺的是 **本地文件 → 指纹** 的反向索引（MMCS 算法或 `sha256` 映射表） |
+| **上传进度表** | `scan_state` 是扫描专用（AGENTS 明确禁止复用），需新建 |
+| **MediaStore 读取 + ContentObserver** | 全项目 **0 处** `ContentObserver`，目前只下载不监听 |
+| **`PCS-Photos` Cookie 校验** | 当前只校验 `PCS-CloudKit`，无 `PCS-Photos` 校验 —— 这是 AGENTS §12 的红线要求 |
+
+### 3A.4 三个开工前必须先想清楚的问题
+
+> [!IMPORTANT]
+> **① 指纹链路已闭环（Round 2 探针），不再是未知数。**
+>
+> 先把两个“哈希”分开，它们不是一回事：
+>
+> | 哈希 | 长度 | 谁产生 | 用途 |
+> | --- | --- | --- | --- |
+> | **SHA-256** | 32 字节 / 44 字符 Base64（`=` 结尾） | 客户端 | 仅作 `/assets/upload` 的**签名** |
+> | **MMCS `fileChecksum`** | 21 字节 / 28 字符 Base64（`A` 开头，首字节 `0x01`） | 服务端（上传后） | **即 `resOriginalFingerprint`，即 `masterId`** |
+>
+> 实测铁律：`masterId == resOriginalFingerprint == receipt.singleFile.fileChecksum`。
+>
+> 查重因此分两阶段：
+> 1. **第 1 层（本地，零网络）**：在 Go 层复现 MMCS 21 字节指纹算法，拿结果直接查
+>    `photo_assets.masterId`；暂不做算法时退化为 `(filePath, fileSize, lastModified, sha256) → masterId`
+>    本地映射表（代价：识别不了其他 Apple 设备已上传过的同一张原图）
+> 2. **第 2 层（云端兜底）**：`/records/lookup`，`recordName = fingerprint`，`desiredKeys = ["recordName"]`
+
+> [!WARNING]
+> **② 现有的“删除”不是主动写云端，不能当上传模板。**
+>
+> ISS-031 的实现是**被动对账**：发现云端 `isDeleted=1` 后清理本地，
+> 并未发 `/records/modify`。所以它只能提供“软删除”这个概念，
+> **无法**作为上传写操作的代码模板。
+
+> [!CAUTION]
+> **③ `resOriginalFingerprint` 不要直接加进 `defaultDesiredKeys`。**
+>
+> 那会让**每一次分页查询**的响应都变大（全库扫描有上百次请求）。
+> 而且它本来就等于 `recordName` —— 查重时连这一列都不必取，`desiredKeys` 只写 `["recordName"]` 即可。
 
 ---
 

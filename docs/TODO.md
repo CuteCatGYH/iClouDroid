@@ -250,18 +250,69 @@
 | 侧边手势拖满 / 拖一半取消 / 箭头 / 返回键 | 全部正确，`topResumedActivity` 始终 MainActivity ✅ |
 
 
-### Phase 3: Android 本地相册自动备份 (增量上传)
+### Phase 3: Android 本地相册自动备份 (增量上传) 🟡 (底层已打通，UI 与控制策略开发中)
 
-- [ ] **本地相册监听与云端去重**
-  - [ ] `MediaStore` 扫描用户勾选目录（`DCIM/Camera`、`Pictures/Screenshots`）
-  - [ ] Go 层实现与 CloudKit 一致的文件指纹计算，上传前 `/records/lookup` 批量查重
-- [ ] **Go 核心层：CloudKit 照片流式上传链路**
-  - [ ] 步骤 1：`/assets/upload` 申请上传凭证，获取临时 `uploadURL`
-  - [ ] 步骤 2：Go 层通过本地文件路径 `os.File` 流式上传至 MMCS，提取 `singleFile` 签名
-  - [ ] 步骤 3：`/records/modify` 提交事务（`CPLMaster` + `CPLAsset`），写入 EXIF 时间戳与 GPS
+> [!NOTE]
+> **Phase 3 进度**：Phase 3.1 协议与底层数据工程（Go 核心上传、FD 零内存流式上传、Room v9 队列、`scan_seen_ids` 对账保护）已全量落地并通过测试；**Phase 3.2 备份 UI 与高级控制策略正在开发中**。
+
+#### Phase 3.1: 协议与数据底层工程 ✅
+- [x] **协议验证与探针闭环**
+  - [x] `/assets/upload`（SHA-256 签名）→ `singleFileUpload` 直链
+  - [x] `*os.File` 零内存流式 POST（16MB 图 / 105MB 视频均 `200 OK`，**免分片**）
+  - [x] `/records/modify` 原子提交 `CPLMaster`（`recordName = fileChecksum`）+ `CPLAsset`
+  - [x] 回环验证：上传后 `syncIncremental()` 能把新 asset 拉回 `photo_assets`
+- [x] **Go 核心层：上传链路工程化 (`go-core/upload.go`)**
+  - [x] 新增 `go-core/upload.go`：接收文件描述符（`fd`）或路径，使用 `os.NewFile` + `io.Copy` 零内存流式哈希，`http.NewRequest(POST, uploadUrl, *os.File)` + 显式 `ContentLength` 流式上传
+  - [x] 导出 `UploadPhotoAsset(fd, filename, mimeType, metadataJson)`，返回 JSON 内嵌 `ResultBase`
+  - [x] `CPLAsset.assetDate` 提取 EXIF `DateTimeOriginal`，保证相册时间线准确
+- [x] **查重（两阶段防死锁机制）**
+  - [x] 第 1 层：前置基于 `localSha256` 查本地 `upload_queue`
+  - [x] 第 2 层：后置在收到 `fileChecksum` 后查 `photo_assets.masterId`，命中即跳过 `/records/modify`，避免重复资产
+- [x] **数据层与安全**
+  - [x] Room **v9**（`MIGRATION_8_9`）新增 `upload_queue` 表
+  - [x] 增量同步/上传入库接入 `scan_seen_ids` 保护，防止被月扫描对账引擎误删
+  - [x] 所有写入持 `PhotoRepository.dataMutationMutex`，且各环节检查 `isWiping` 阻断点
+- [x] **鉴权强校验**
+  - [x] `GetSessionStateSummary` 与上传守卫强校验 `X-APPLE-WEBAUTH-PCS-Photos`
+- [x] **Android 端：后台任务调度 (`WorkManager`) & Scoped Storage**
+  - [x] `PhotoBackupWorker` 基础后台上传任务与约束
+  - [x] 使用 `MediaStore.setRequireOriginal(uri)` 保持原始 GPS 坐标，通过 `openFileDescriptor(uri, "r")?.detachFd()` 向 Go 层传递 FD
+
+#### Phase 3.1b: 上传记录 Apple 端可渲染性 ✅ (ISS-040)
+- [x] **`res*FileType` 改为 UTI**（`public.heic` / `public.jpeg` / `public.mpeg-4`）—— 写 MIME 会导致**全部**上传项在 Apple 端灰块/感叹号
+- [x] **重写 `mediaMetaDataEnc` 编码**：改用 `howett.net/plist` + 写入前 `Unmarshal` 自校验（旧手写 bplist 结构损坏，`plutil` 直接拒解）
+- [x] **视频 `AVAssetProxy`**：抽 `ftyp`+`moov` 盒 → `{moop, mpvr, name}`，修复「时长显示 0:00」
+- [x] **视频 JPEG 派生图**：`getFrameAtTime` 首帧 → 320/2048，修复 Apple 端无 poster frame 与 App 内灰底「iCloud」
+- [x] **派生图方向**：图片按 EXIF 物理旋转；视频用帧宽高比自检是否需旋转（避免 `getFrameAtTime` 已旋转时再转一次）
+- [x] **补齐字段**：`fullSizeJPEGSource` / `importedBy` / `importGroupId` / `assetSubtypeV2` / `customRenderedValue` / `timeZoneNameEnc` / `timeZoneOffset` / `codec` / `videoFrameRate`
+- [x] **`assetId` 改标准 UUID v4**（原 `ASSET-<纳秒>` 会泄漏进网页 URL）
+- [x] **`/records/modify` 解析 `serverErrorCode`**（CloudKit 200 也可能是失败）
+- [x] **上传幂等查重**：`masterRecordExists()` 在建记录前 lookup `recordName = fileChecksum`，命中则返回 `duplicate: true`
+- [x] **清理既有重复行**：`PhotoDao.deleteDuplicateMasterRows()`，扫描前自动执行
+- [x] **`localSha256` 回写** `upload_queue`（此前永远是空串，第 1 层查重形同虚设）
+
+#### Phase 3.2: 备份 UI 界面与高级控制策略 ⏳
+- [ ] **相册分文件夹备份管理 UI**
+  - [ ] 在 `LocalAlbum` 相册列表与详情页提供“开启自动备份”开关（持久化 `isBackupEnabled`）
+  - [ ] 仅针对开启备份的相册文件夹（`BUCKET_ID`）扫描并入队
+- [ ] **实时备份进度与状态面板**
+  - [ ] 在主界面 / 侧边栏添加“备份状态栏”：显示待上传数量、当前上传文件名、进度百分比与上传速度
+  - [ ] 队列管理 Sheet：查看排队列表、重试失败任务、手动暂停/恢复备份
+- [ ] **智能电池与网络控制策略**
+  - [ ] 低电量自动暂停（WorkManager `setRequiresBatteryNotLow(true)`）
+  - [ ] 仅充电时备份开关（WorkManager `setRequiresCharging(true)`）
+  - [ ] 蜂窝移动网络上传开关（默认仅限 Wi-Fi，允许用户开启移动网络备份）
+- [ ] **Live Photo / 实况照片打包上传** (Phase 4 衔接)
+  - [ ] Room **v8**（`MIGRATION_7_8`）新增 `upload_queue`，**不复用** `scan_state`（扫描专用游标表）
+  - [ ] 所有写入持 `PhotoRepository.dataMutationMutex`（与月扫描/增量同步共用同一把锁）
+  - [ ] 每个阶段检查 `isWiping`，退出登录立即中断 HTTP 流并放弃写库
+- [ ] **鉴权前置**
+  - [ ] `GetSessionStateSummary` 与上传守卫补 `X-APPLE-WEBAUTH-PCS-Photos` 校验（当前只校验 `PCS-CloudKit`）
 - [ ] **Android 端：后台任务调度 (`WorkManager`)**
-  - [ ] 周期性任务 + `ContentObserver` 触发器（仅 Wi-Fi / 充电时 / 电量充足）
-  - [ ] `ForegroundService (dataSync)` 通知栏展示进度与异常重试
+  - [ ] `PhotoBackupWorker` + `ForegroundService (dataSync)` 通知栏进度与退避重试
+  - [ ] 监听用 `Constraints.Builder().addContentUriTrigger(uri, true)`，
+        而不是内存里的 `ContentObserver`（进程后台被杀即失效）
+  - [ ] 仅 Wi-Fi / 充电 / 电量充足约束；错误分类复用 `classifyCoreResponse()`
 
 ### Phase 4: 跨生态深度适配 (安卓 + 苹果痛点打磨)
 

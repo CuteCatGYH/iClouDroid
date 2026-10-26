@@ -82,6 +82,9 @@ fun SettingsScreen(
     val useDynamicColor by settings.useDynamicColor.collectAsStateWithLifecycle()
     val monthCoverEnabled by settings.monthCoverEnabled.collectAsStateWithLifecycle()
     val navBarDestinations by settings.navBarDestinations.collectAsStateWithLifecycle()
+    val allowCellularUpload by settings.allowCellularUpload.collectAsStateWithLifecycle()
+    val requireCharging by settings.requireCharging.collectAsStateWithLifecycle()
+    val requireBatteryNotLow by settings.requireBatteryNotLow.collectAsStateWithLifecycle()
 
     var showScanWarning by remember { mutableStateOf(false) }
 
@@ -158,6 +161,9 @@ fun SettingsScreen(
                                 useDynamicColor = useDynamicColor,
                                 monthCoverEnabled = monthCoverEnabled,
                                 navBarDestinations = navBarDestinations,
+                                allowCellularUpload = allowCellularUpload,
+                                requireCharging = requireCharging,
+                                requireBatteryNotLow = requireBatteryNotLow,
                                 frequency = frequency,
                                 customDays = customDays,
                                 isFullScanRunning = isFullScanRunning,
@@ -254,6 +260,9 @@ private fun SettingsRow(
     useDynamicColor: Boolean,
     monthCoverEnabled: Boolean,
     navBarDestinations: Set<com.getup.iClouDroid.ui.navigation.AppDestination>,
+    allowCellularUpload: Boolean,
+    requireCharging: Boolean,
+    requireBatteryNotLow: Boolean,
     frequency: ScanFrequency,
     customDays: Int,
     isFullScanRunning: Boolean,
@@ -264,6 +273,81 @@ private fun SettingsRow(
     val context = LocalContext.current
 
     when (item) {
+        SettingsItem.BACKUP_CELLULAR_DATA -> Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "允许蜂窝移动网络备份",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = if (allowCellularUpload) "已允许使用蜂窝移动数据上传备份" else "默认仅限 Wi-Fi 网络下执行自动备份",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Switch(
+                checked = allowCellularUpload,
+                onCheckedChange = { settings.setAllowCellularUpload(it) }
+            )
+        }
+
+        SettingsItem.BACKUP_REQUIRE_CHARGING -> Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "仅限设备充电时备份",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = if (requireCharging) "仅在连接电源充电时触发后台自动备份" else "连接电源或未充电时均可运行后台备份",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Switch(
+                checked = requireCharging,
+                onCheckedChange = { settings.setRequireCharging(it) }
+            )
+        }
+
+        SettingsItem.BACKUP_BATTERY_NOT_LOW -> Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "低电量时自动暂停备份",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = if (requireBatteryNotLow) "系统处于低电量模式时暂停后台备份" else "忽略系统电量限制继续备份",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Switch(
+                checked = requireBatteryNotLow,
+                onCheckedChange = { settings.setRequireBatteryNotLow(it) }
+            )
+        }
+
         SettingsItem.ICLOUD_WEB -> {
             var showICloudWebDialog by remember { mutableStateOf(false) }
             val isChinaMainland = remember(context) {
@@ -467,7 +551,7 @@ private fun SettingsRow(
         )
 
         SettingsItem.CUSTOM_INTERVAL -> DropdownRow(
-            title = "自定义��期",
+            title = "自定义周期",
             subtitle = if (frequency == ScanFrequency.CUSTOM) {
                 "每 $customDays 天执行一次"
             } else {

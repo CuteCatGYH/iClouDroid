@@ -175,6 +175,67 @@ class AppSettings(context: Context) {
         _navBarDestinations.value = destinations
     }
 
+    // ---------------------------------------------------------------------------------------
+    // Automatic Photo Backup Preferences
+    // ---------------------------------------------------------------------------------------
+
+    private val _enabledBackupBucketIds = MutableStateFlow(
+        prefs.getStringSet(KEY_ENABLED_BACKUP_BUCKET_IDS, emptySet())?.toSet() ?: emptySet()
+    )
+    val enabledBackupBucketIds: StateFlow<Set<String>> = _enabledBackupBucketIds.asStateFlow()
+
+    fun toggleBackupBucketId(bucketId: String, enabled: Boolean) {
+        val current = _enabledBackupBucketIds.value.toMutableSet()
+        if (enabled) current.add(bucketId) else current.remove(bucketId)
+        prefs.edit { putStringSet(KEY_ENABLED_BACKUP_BUCKET_IDS, current) }
+        _enabledBackupBucketIds.value = current
+    }
+
+    private val _allowCellularUpload = MutableStateFlow(
+        prefs.getBoolean(KEY_ALLOW_CELLULAR_UPLOAD, false)
+    )
+    val allowCellularUpload: StateFlow<Boolean> = _allowCellularUpload.asStateFlow()
+
+    fun setAllowCellularUpload(value: Boolean) {
+        prefs.edit { putBoolean(KEY_ALLOW_CELLULAR_UPLOAD, value) }
+        _allowCellularUpload.value = value
+    }
+
+    private val _requireCharging = MutableStateFlow(
+        prefs.getBoolean(KEY_REQUIRE_CHARGING, false)
+    )
+    val requireCharging: StateFlow<Boolean> = _requireCharging.asStateFlow()
+
+    fun setRequireCharging(value: Boolean) {
+        prefs.edit { putBoolean(KEY_REQUIRE_CHARGING, value) }
+        _requireCharging.value = value
+    }
+
+    private val _requireBatteryNotLow = MutableStateFlow(
+        prefs.getBoolean(KEY_REQUIRE_BATTERY_NOT_LOW, true)
+    )
+    val requireBatteryNotLow: StateFlow<Boolean> = _requireBatteryNotLow.asStateFlow()
+
+    fun setRequireBatteryNotLow(value: Boolean) {
+        prefs.edit { putBoolean(KEY_REQUIRE_BATTERY_NOT_LOW, value) }
+        _requireBatteryNotLow.value = value
+    }
+
+    private val _forceUploadUntilTimestamp = MutableStateFlow(
+        prefs.getLong(KEY_FORCE_UPLOAD_UNTIL, 0L)
+    )
+    val forceUploadUntilTimestamp: StateFlow<Long> = _forceUploadUntilTimestamp.asStateFlow()
+
+    fun enableForceUploadForOneHour() {
+        val until = System.currentTimeMillis() + 3600_000L
+        prefs.edit { putLong(KEY_FORCE_UPLOAD_UNTIL, until) }
+        _forceUploadUntilTimestamp.value = until
+    }
+
+    fun isForceUploadActive(): Boolean {
+        return _forceUploadUntilTimestamp.value > System.currentTimeMillis()
+    }
+
     companion object {
         private const val PREFS_NAME = "icloud_droid_settings"
         private const val KEY_THEME_MODE = "theme_mode"
@@ -184,6 +245,11 @@ class AppSettings(context: Context) {
         private const val KEY_CUSTOM_INTERVAL_DAYS = "custom_interval_days"
         private const val KEY_MONTH_COVER_ENABLED = "month_cover_enabled"
         private const val KEY_NAV_BAR_DESTINATIONS = "nav_bar_destinations"
+        private const val KEY_ENABLED_BACKUP_BUCKET_IDS = "enabled_backup_bucket_ids"
+        private const val KEY_ALLOW_CELLULAR_UPLOAD = "allow_cellular_upload"
+        private const val KEY_REQUIRE_CHARGING = "require_charging"
+        private const val KEY_REQUIRE_BATTERY_NOT_LOW = "require_battery_not_low"
+        private const val KEY_FORCE_UPLOAD_UNTIL = "force_upload_until"
 
         const val MIN_CUSTOM_DAYS = 1
         const val MAX_CUSTOM_DAYS = 365

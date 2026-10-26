@@ -145,6 +145,15 @@ class MonthScanEngine(
                 Log.i(TAG, "Purged $purgedOrphans legacy orphan rows before scanning")
             }
 
+            // Upload de-duplication used to be missing, so the same file could land twice as two
+            // `CPLAsset` records sharing one `CPLMaster`. Apple's clients collapse those (they key
+            // on the master) but our grid keys on the asset record name, so the library looked
+            // clean there and duplicated here. Cheap to sweep on every scan.
+            val purgedDuplicates = photoDao.deleteDuplicateMasterRows()
+            if (purgedDuplicates > 0) {
+                Log.w(TAG, "Purged $purgedDuplicates duplicate rows sharing one masterId")
+            }
+
             // v4 migration left every pre-existing row at yearMonth = 0, and an interrupted scan
             // may have left the same. Bucket them BEFORE deciding whether there is anything to do:
             // otherwise an install that already fetched photos shows a populated count but an

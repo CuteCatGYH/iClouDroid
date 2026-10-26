@@ -10,6 +10,7 @@ import com.getup.iClouDroid.feature.photos.data.db.PhotoMonthIndexEntity
 import com.getup.iClouDroid.feature.photos.data.db.PurgedIdDao
 import com.getup.iClouDroid.feature.photos.data.db.PurgedIdEntity
 import com.getup.iClouDroid.feature.photos.data.db.ScanSeenIdEntity
+import com.getup.iClouDroid.feature.photos.data.db.ScanStateEntity
 import com.getup.iClouDroid.feature.photos.data.db.SyncStateEntity
 import com.getup.iClouDroid.feature.photos.data.image.ICloudImageLoaderFactory
 import com.getup.iClouDroid.feature.photos.data.image.ICloudImageModel
@@ -202,6 +203,13 @@ internal fun parseCookiePairs(cookieStr: String?): Set<Pair<String, String>> {
         }
         .toSet()
 }
+
+data class LocalUploadResult(
+    val success: Boolean,
+    val masterId: String,
+    val assetId: String,
+    val fileChecksum: String
+)
 
 class PhotoRepository(
     private val database: PhotoDatabase,
@@ -1128,6 +1136,18 @@ class PhotoRepository(
                         // Keep the month sections in step, or the synced photos stay stranded at
                         // yearMonth = 0 and never appear in the gallery (P2-016).
                         rebuildMonthIndexFor(upsertable.map { it.yearMonth }.distinct())
+
+                        // Protect newly synced records against reconciliation deletion if scan is in progress (ISS-031 / 修正 2)
+                        val scanState = scanStateDao.get(ScanStateEntity.KEY_MONTH_SCAN)
+                        if (scanState != null && !scanState.isComplete) {
+                            val now = System.currentTimeMillis()
+                            val seenEntities = upsertable.map {
+                                ScanSeenIdEntity(id = it.id, masterId = it.masterId, scannedAt = now)
+                            }
+                            scanSeenIdDao.upsertAll(seenEntities)
+                            Log.d(TAG, "Inserted ${seenEntities.size} newly synced items into scan_seen_ids for active scan")
+                        }
+
                         totalChanged += upsertable.size
                     }
                 }
@@ -1736,6 +1756,287 @@ class PhotoRepository(
      * synchronously before doing any work, so there is no window where a stale value could leak
      * through. See docs/PITFALLS.md §7 ("synchronous sentinel > async state machine").
      */
+    /**
+     * Enqueues local photo for background upload (Phase 3).
+     */
+    suspend fun enqueuePhotoForUpload(
+        contentUri: android.net.Uri,
+        filename: String,
+        mimeType: String,
+        fileSize: Long,
+        localSha256: String
+    ): Result<Long> = dataMutationMutex.withLock {
+        withContext(Dispatchers.IO) {
+            wipeBlocked()?.let { return@withContext Result.failure(it.exceptionOrNull()!!) }
+
+            val existingInQueue = database.uploadQueueDao().findBySha256(localSha256)
+            if (existingInQueue != null) {
+                Log.d(TAG, "Photo already in upload queue: $filename ($localSha256)")
+                return@withContext Result.success(existingInQueue.id)
+            }
+
+            val entity = com.getup.iClouDroid.feature.photos.data.db.UploadQueueEntity(
+                mediaStoreUri = contentUri.toString(),
+                filename = filename,
+                mimeType = mimeType,
+                fileSize = fileSize,
+                localSha256 = localSha256,
+                status = "PENDING",
+                createdAt = System.currentTimeMillis(),
+                updatedAt = System.currentTimeMillis()
+            )
+            val queueId = database.uploadQueueDao().insert(entity)
+            Log.d(TAG, "Enqueued photo for upload: $filename (queueId: $queueId)")
+            Result.success(queueId)
+        }
+    }
+
+    /**
+     * Executes single photo upload using file descriptor (FD) via Go core.
+     */
+    suspend fun uploadPhotoFromQueue(queueItem: com.getup.iClouDroid.feature.photos.data.db.UploadQueueEntity, context: Context): Result<LocalUploadResult> = dataMutationMutex.withLock {
+        withContext(Dispatchers.IO) {
+            wipeBlocked()?.let { return@withContext Result.failure(it.exceptionOrNull()!!) }
+
+            val sessionCheck = ensureGoSession()
+            if (sessionCheck.isFailure) {
+                return@withContext Result.failure(sessionCheck.exceptionOrNull() ?: Exception("会话无法建立"))
+            }
+
+            val cookieValidation = com.getup.iClouDroid.ui.auth.CookieValidationResult.validate(sessionManager.getCookieString())
+            if (!cookieValidation.hasPcsPhotos) {
+                return@withContext Result.failure(Exception("缺少 X-APPLE-WEBAUTH-PCS-Photos Cookie，拒绝上传"))
+            }
+
+            val uri = android.net.Uri.parse(queueItem.mediaStoreUri)
+
+            // Whether we ended up reading the untouched original stream. When this is false the
+            // platform has redacted location, so the record will carry no GPS - worth a log line,
+            // because the upload otherwise succeeds and the loss is invisible.
+            var openedOriginal = false
+
+            // The URI to read *content* from. `requireOriginal` is what un-redacts GPS, so the
+            // EXIF reader has to be handed this one too - not the plain [uri]. Passing the plain
+            // URI here was a second, independent reason GPS never made it into a photo record,
+            // even on a device that already had the permission.
+            var contentUri = uri
+
+            val pfd = try {
+                val requireOriginalUri = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                    try {
+                        android.provider.MediaStore.setRequireOriginal(uri)
+                    } catch (e: Exception) {
+                        uri
+                    }
+                } else {
+                    uri
+                }
+
+                try {
+                    val fd = context.contentResolver.openFileDescriptor(requireOriginalUri, "r")
+                    if (fd != null) {
+                        openedOriginal = true
+                        contentUri = requireOriginalUri
+                    }
+                    fd
+                } catch (e: Exception) {
+                    // `UnsupportedOperationException: Caller must hold ACCESS_MEDIA_LOCATION
+                    // permission to access original` lands here. The retry below keeps the upload
+                    // working; only GPS is lost.
+                    Log.w(
+                        TAG,
+                        "Original stream unavailable for $uri (${e.javaClass.simpleName}: ${e.message}); " +
+                            "falling back to the redacted stream - GPS will be dropped"
+                    )
+                    context.contentResolver.openFileDescriptor(uri, "r")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to open FileDescriptor for $uri", e)
+                null
+            }
+
+            if (pfd == null) {
+                database.uploadQueueDao().update(queueItem.copy(status = "FAILED", lastError = "Unable to open FileDescriptor", updatedAt = System.currentTimeMillis()))
+                return@withContext Result.failure(Exception("无法打开文件描述符"))
+            }
+
+            val itemType = when {
+                // `.mov` must be reported as the QuickTime UTI, not folded into MPEG-4. A genuine
+                // iPhone clip carries `com.apple.quicktime-movie`, and the client keys its
+                // playability and its `codec` rendering off this value.
+                queueItem.mimeType == "video/quicktime" -> "com.apple.quicktime-movie"
+                queueItem.mimeType.startsWith("video/") -> "public.mpeg-4"
+                queueItem.mimeType == "image/png" -> "public.png"
+                queueItem.mimeType == "image/gif" -> "com.compuserve.gif"
+                queueItem.mimeType == "image/heic" || queueItem.mimeType == "image/heif" -> "public.heic"
+                else -> "public.jpeg"
+            }
+
+            val isVideo = queueItem.mimeType.startsWith("video/")
+
+            val exifData = if (!isVideo) {
+                // [contentUri] carries `requireOriginal`, without which MediaProvider strips the
+                // GPS tags out of the EXIF before we ever see them.
+                LocalExifExtractor.extract(context, contentUri)
+            } else {
+                null
+            }
+            val videoInfo = if (isVideo) {
+                LocalExifExtractor.extractVideoInfo(context, contentUri)
+            } else {
+                null
+            }
+
+            // Videos need a JPEG poster frame too. Without one the asset has no thumbnail
+            // anywhere: an exclamation mark on Apple's side and the grey Coil error tile in our
+            // own grid (ISS-040).
+            val derivatives = if (isVideo) {
+                LocalExifExtractor.generateVideoDerivatives(
+                    context, contentUri, videoInfo?.rotation ?: 0
+                )
+            } else {
+                // Pass the orientation already parsed above so the derivatives cannot disagree
+                // with the `originalOrientation` this same upload writes into the record.
+                LocalExifExtractor.generateDerivatives(
+                    context, contentUri, exifData?.orientation ?: 1
+                )
+            }
+
+            val assetDate = exifData?.assetDate
+                ?: videoInfo?.creationDateMillis?.takeIf { it > 0 }
+                ?: System.currentTimeMillis()
+
+            val metadataJson = JSONObject().apply {
+                put("assetDate", assetDate)
+                put("originalCreationDate", assetDate)
+                put("width", videoInfo?.width ?: exifData?.width ?: 0)
+                put("height", videoInfo?.height ?: exifData?.height ?: 0)
+                put("orientation", exifData?.orientation ?: 1)
+                put("itemType", itemType)
+                // NOTE: `fileType` is intentionally overwritten in the Go core with `itemType`.
+                // Apple stores a UTI there, never a MIME type (ISS-040).
+                put("fileType", queueItem.mimeType)
+
+                // Detailed Camera EXIF (photos only)
+                exifData?.make?.let { put("make", it) }
+                exifData?.model?.let { put("model", it) }
+                exifData?.software?.let { put("software", it) }
+                exifData?.lensModel?.let { put("lensModel", it) }
+                exifData?.fNumber?.let { put("fNumber", it) }
+                exifData?.exposureTime?.let { put("exposureTime", it) }
+                exifData?.iso?.let { put("iso", it) }
+                exifData?.focalLength?.let { put("focalLength", it) }
+                exifData?.focalLength35?.let { put("focalLength35", it) }
+                exifData?.altitude?.let { put("altitude", it) }
+                exifData?.dateTimeOriginal?.let { put("dateTimeOriginal", it) }
+                exifData?.lat?.let { put("lat", it) }
+                exifData?.lon?.let { put("lon", it) }
+
+                // Videos carry no EXIF, so their coordinates come from MediaStore instead.
+                // `lat`/`lon` are shared with the photo path: the Go core turns either into the
+                // QuickTime ISO-6709 field for video and into the `{GPS}` plist for photos.
+                if (isVideo) {
+                    videoInfo?.latitude?.let { put("lat", it) }
+                    videoInfo?.longitude?.let { put("lon", it) }
+                }
+
+                // Video attributes (videos only).
+                //
+                // `videoMake`/`videoModel`/`videoSoftware`/`lat`/`lon` are what the Go core writes
+                // into the QuickTime `moov/meta` block. Apple renders a video's camera-info panel
+                // from those atoms, not from EXIF, so without them the upload shows a duration and
+                // no camera information (ISS-040).
+                videoInfo?.codec?.let { put("codec", it) }
+                videoInfo?.frameRate?.let { put("videoFrameRate", it) }
+                if ((videoInfo?.durationMs ?: 0L) > 0) put("durationMs", videoInfo!!.durationMs)
+                videoInfo?.make?.let { put("videoMake", it) }
+                videoInfo?.model?.let { put("videoModel", it) }
+                videoInfo?.software?.let { put("videoSoftware", it) }
+
+                // Derivatives
+                derivatives.thumbPath?.let { put("thumbPath", it) }
+                if (derivatives.thumbWidth > 0) put("thumbWidth", derivatives.thumbWidth)
+                if (derivatives.thumbHeight > 0) put("thumbHeight", derivatives.thumbHeight)
+                derivatives.medPath?.let { put("medPath", it) }
+                if (derivatives.medWidth > 0) put("medWidth", derivatives.medWidth)
+                if (derivatives.medHeight > 0) put("medHeight", derivatives.medHeight)
+            }.toString()
+
+            val rawFd = pfd.detachFd()
+            database.uploadQueueDao().update(queueItem.copy(status = "UPLOADING", updatedAt = System.currentTimeMillis()))
+
+            val jsonResultStr = try {
+                Icloudcore.uploadPhotoAsset(
+                    rawFd.toLong(),
+                    queueItem.filename,
+                    queueItem.mimeType,
+                    metadataJson
+                )
+            } finally {
+                derivatives.thumbPath?.let { java.io.File(it).delete() }
+                derivatives.medPath?.let { java.io.File(it).delete() }
+            }
+
+            val jsonResult = JSONObject(jsonResultStr)
+            val success = jsonResult.optBoolean("success", false)
+
+            if (success) {
+                val masterId = jsonResult.optString("masterId", "")
+                val assetId = jsonResult.optString("assetId", "")
+                // True when the Go core found an existing `CPLMaster` for these exact bytes and
+                // skipped the record creation. Still a success - just nothing new to fetch.
+                val duplicate = jsonResult.optBoolean("duplicate", false)
+                // Persist the SHA-256 the Go core used to sign `/assets/upload`. Without this the
+                // first dedupe layer (`findBySha256`) never matched anything, because the column
+                // stayed empty on every row.
+                val localSha256 = jsonResult.optString("localSha256", "")
+                database.uploadQueueDao().update(
+                    queueItem.copy(
+                        status = "SUCCESS",
+                        localSha256 = localSha256.ifBlank { queueItem.localSha256 },
+                        updatedAt = System.currentTimeMillis()
+                    )
+                )
+
+                // Attribution for the next time an upload renders grey / exclamation on Apple's
+                // side. Never log signed URLs (AGENTS 8.2).
+                Log.i(
+                    TAG,
+                    "upload ok master=$masterId asset=$assetId duplicate=$duplicate itemType=$itemType " +
+                        "thumb=${derivatives.thumbPath != null} med=${derivatives.medPath != null} " +
+                        "w=${videoInfo?.width ?: exifData?.width ?: 0} h=${videoInfo?.height ?: exifData?.height ?: 0} " +
+                        "gps=${exifData?.lat != null || videoInfo?.latitude != null} original=$openedOriginal"
+                )
+
+                if (!duplicate) {
+                    // Post-upload idempotency guard: Trigger syncIncremental to pull asset back into local photo_assets
+                    syncIncrementalLocked(100)
+                }
+
+                Result.success(
+                    LocalUploadResult(
+                        success = true,
+                        masterId = masterId,
+                        assetId = assetId,
+                        fileChecksum = masterId
+                    )
+                )
+            } else {
+                val errCode = jsonResult.optString("errorCode", "UPLOAD_FAILED")
+                val errMsg = jsonResult.optString("errorMsg", "Upload failed")
+                database.uploadQueueDao().update(
+                    queueItem.copy(
+                        status = "FAILED",
+                        retryCount = queueItem.retryCount + 1,
+                        lastError = "$errCode: $errMsg",
+                        updatedAt = System.currentTimeMillis()
+                    )
+                )
+                Result.failure(Exception("$errCode: $errMsg"))
+            }
+        }
+    }
+
     @Volatile
     var isWiping: Boolean = false
         private set
@@ -1798,6 +2099,7 @@ class PhotoRepository(
             scanStateDao.clearAll()
             photoMonthIndexDao.clearAll()
             photoDao.clearAll()
+            database.uploadQueueDao().clearAll()
 
             // In-memory refresh bookkeeping refers to masters that no longer exist.
             refreshMutex.withLock {
