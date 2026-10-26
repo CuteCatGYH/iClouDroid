@@ -13,12 +13,17 @@ import androidx.compose.ui.graphics.vector.ImageVector
  * Adding an iCloud feature means adding an entry here plus a branch in
  * [com.getup.iClouDroid.ui.AppShell] — no changes to authentication or to the other features.
  */
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.LocationOn
+
 enum class AppDestination(
     val label: String,
     val icon: ImageVector
 ) {
-    Photos("Photo", Icons.Default.Photo),
-    Albums("Albums", Icons.Default.PhotoAlbum),
-    Drive("Drive", Icons.Default.Folder),
-    Notes("备忘录", Icons.AutoMirrored.Filled.Note)
+    Photos("照片", Icons.Default.Photo),
+    Albums("相册", Icons.Default.PhotoAlbum),
+    Drive("云盘", Icons.Default.Folder),
+    Notes("备忘录", Icons.AutoMirrored.Filled.Note),
+    Reminders("提醒", Icons.Default.CheckCircle),
+    FindMy("查找", Icons.Default.LocationOn)
 }

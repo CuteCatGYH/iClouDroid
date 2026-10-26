@@ -444,6 +444,11 @@ func parseRecords(rawRecords []CKRecord) ([]PhotoItem, []string) {
 			}
 		} else {
 			item.Filename = asset.RecordName
+			if duration > 0 {
+				item.MediaType = "VIDEO"
+			} else {
+				item.MediaType = ""
+			}
 		}
 
 		photos = append(photos, item)

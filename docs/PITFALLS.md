@@ -679,3 +679,29 @@ RuntimeException: setDataSource failed: status = 0xFFFFFFEA
 系统按 `LAST_MEDIA_SYNC_GENERATION` 缓存行，值不变就**不重新查询**。
 改了列取值规则却不 bump，已安装设备永远看到旧数据（开发机上看不到，因为 `pm clear` 过）。
 
+## 22. CloudKit 增量变更包缺失 `CPLMaster` 导致 Master 属性被冲刷覆写
+
+**现象**：照片在 App/Web/iOS 点赞/收藏后，刷新本地数据发现 `LIVE_PHOTO` 媒体类型退化为 `IMAGE`，`videoComplUrl` 丢失。
+**根因**：CloudKit 增量同步 (`/records/changes`) 仅返回变动的 `CPLAsset`，缺省 `CPLMaster`。若 Go 侧将 `MediaType` 默认写死为 `"IMAGE"`，且 Kotlin 侧使用 Room `@Insert(onConflict = OnConflictStrategy.REPLACE)`，会将 SQLite 中原本正确的 `mediaType == "LIVE_PHOTO"` 和 `videoComplUrl` 用默认的 `"IMAGE"` 和 `null` 覆盖改写！
+**规避措施**：
+1. Go 解析时，若 `CPLMaster` 缺失，`MediaType` 留空 `""`，表明 Master 级字段未在此增量包中。
+2. Kotlin 侧在 `PhotoDao.upsertAll()` 之前执行 `mergeWithExistingAssets()`：如果增量更新缺失 Master 属性（如 `mediaType` 为空/`"IMAGE"` 且 `videoComplUrl` 为空），而 DB 已有记录为 `LIVE_PHOTO` / `VIDEO` 且持有 `videoComplUrl`，则强行保留 DB 中的 Master 属性。详见 [ISS-036](CHANGELOG_ISSUES.md#iss-036-收藏操作导致-live_photo-媒体类型被冲刷覆写为-image)。
+
+## 23. 实况照片保存：拆分双文件在 MediaStore 中暴露为两条独立记录、EXIF 丢失与方向倒置
+
+**现象**：
+1. 下载 Live Photo 后，系统相册并排出现“一张照片 + 一段 2 秒视频”。
+2. 未预览前下载变静态图。
+3. 照片详细信息面板中丢失相机型号、快门、ISO、GPS。
+4. 静态图颠倒/侧躺，而实况视频正向。
+
+**根因**：
+1. 分别向 `MediaStore.Images` 与 `MediaStore.Video` 插入两条记录，Android 视其为独立文件。
+2. 直链刷新没带 `force = true`，且依赖 UI 触发 `refreshUrlsForMaster` 导致未预览时 `videoComplUrl` 为空。
+3. 转码/解码 Bitmap 剥离了 Exif 属性，且没有根据 Exif `Orientation` 物理旋转 `Bitmap` 像素。
+
+**规避措施**：
+1. **单文件 Motion Photo 打包**：使用 `packJpegMotionPhoto()` 在 JPEG APP1 插入 Google Motion Photo XMP (`GCamera:MotionPhoto="1"`, `GCamera:MicroVideoOffset`)，将 `.MOV` 视频补充包挂载在 JPEG 尾部，仅向 `MediaStore.Images` 写入唯一一条记录。
+2. **强制刷新**：下载 Live Photo 时若 `videoComplUrl` 为空，强制调用 `repository.refreshUrlsForMaster(masterId, force = true)`。
+3. **EXIF 复制与物理旋转**：解析原图 `TAG_ORIENTATION` 并通过 `Matrix().postRotate()` 将静态图像素物理旋转至正向，重置 `Orientation = 1`；通过 `ExifInterface` 将原图的所有 Exif 字段全量写回产物文件中。详见 [ISS-037](CHANGELOG_ISSUES.md#iss-037-实况照片单文件-motion-photo-打包与-exif-防旋转对齐)。
+

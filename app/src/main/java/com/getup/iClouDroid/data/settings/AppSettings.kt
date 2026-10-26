@@ -158,6 +158,23 @@ class AppSettings(context: Context) {
         _monthCoverEnabled.value = value
     }
 
+    // ---------------------------------------------------------------------------------------
+    // Bottom Navigation Bar Items
+    // ---------------------------------------------------------------------------------------
+
+    private val _navBarDestinations = MutableStateFlow(
+        prefs.getStringSet(KEY_NAV_BAR_DESTINATIONS, null)?.mapNotNull { name ->
+            com.getup.iClouDroid.ui.navigation.AppDestination.entries.find { it.name == name }
+        }?.toSet() ?: (com.getup.iClouDroid.ui.navigation.AppDestination.entries.toSet() - com.getup.iClouDroid.ui.navigation.AppDestination.FindMy)
+    )
+    val navBarDestinations: StateFlow<Set<com.getup.iClouDroid.ui.navigation.AppDestination>> = _navBarDestinations.asStateFlow()
+
+    fun setNavBarDestinations(destinations: Set<com.getup.iClouDroid.ui.navigation.AppDestination>) {
+        if (destinations.isEmpty()) return // ensure at least one
+        prefs.edit { putStringSet(KEY_NAV_BAR_DESTINATIONS, destinations.map { it.name }.toSet()) }
+        _navBarDestinations.value = destinations
+    }
+
     companion object {
         private const val PREFS_NAME = "icloud_droid_settings"
         private const val KEY_THEME_MODE = "theme_mode"
@@ -166,6 +183,7 @@ class AppSettings(context: Context) {
         private const val KEY_SCAN_FREQUENCY = "scan_frequency"
         private const val KEY_CUSTOM_INTERVAL_DAYS = "custom_interval_days"
         private const val KEY_MONTH_COVER_ENABLED = "month_cover_enabled"
+        private const val KEY_NAV_BAR_DESTINATIONS = "nav_bar_destinations"
 
         const val MIN_CUSTOM_DAYS = 1
         const val MAX_CUSTOM_DAYS = 365

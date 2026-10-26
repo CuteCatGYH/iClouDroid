@@ -584,6 +584,18 @@ adb logcat | grep -E "Glide|VideoDecoder|setDataSource|Failed to find any load p
 > 已修复三处确定性缺陷（keyset 分页 / 缓存魔数校验 / 视频降级链），
 > 详见 [ISS-035](CHANGELOG_ISSUES.md#iss-035photopicker-缩略图空白多层柹障式修复与已知残留)。
 
+### 6.8 实况照片 (Live Photo / Motion Photo) 开发规范
+
+1. **增量更新防覆写**：
+   CloudKit 增量同步 (`/records/changes`) 仅返回被修改的 `CPLAsset`，缺省 `CPLMaster`。
+   `PhotoRepository` 必须通过 `mergeWithExistingAssets()` 保护已有记录，绝不可将 `LIVE_PHOTO` 冲刷改写为 `IMAGE`。详见 [ISS-036](CHANGELOG_ISSUES.md#iss-036-收藏操作导致-live_photo-媒体类型被冲刷覆写为-image)。
+2. **下载单文件打包规范**：
+   切勿将实况照片拆分为相册中的两条独立文件（图片+视频）。必须通过 `packJpegMotionPhoto()` 写入 Google Motion Photo APP1 XMP (`GCamera:MotionPhoto="1"`, `GCamera:MicroVideoOffset`)，并将 `.MOV` 视频补充包挂载在 JPEG 尾部，仅向 `MediaStore.Images` 写入唯一一条记录。
+3. **直链强制刷新**：
+   下载 Live Photo 时若 `videoComplUrl` 为空，必须带 `force = true` 调用 `repository.refreshUrlsForMaster()` 向苹果服务器直拉视频链接，不得依赖 UI 是否触发过预览播放。
+4. **EXIF 元数据与像素物理旋转对齐**：
+   转码/解码为 Bitmap 时，必须解析原图 `TAG_ORIENTATION` 并通过 `Matrix().postRotate()` 将静态图像素物理旋转至正方向；同时全量复制原图的 Exif 字段（Make/Model/快门/光圈/ISO/时间/GPS），重置 `Orientation = 1`，确保静态图与视频方向 100% 对齐。详见 [ISS-037](CHANGELOG_ISSUES.md#iss-037-实况照片单文件-motion-photo-打包与-exif-防旋转对齐)。
+
 ---
 
 ## 7. 错误判定规范
@@ -902,7 +914,7 @@ totalDragX > 0  →  右滑  →  上一张
 | Phase 2.5：双向删除同步、全量对账、设置页与周期扫描 | ✅ 完成 |
 | Phase 2.6：Glimpse 风相册 UI、日/月视图、Monet 主题、本地相册、系统云端媒体提供方 | ✅ 完成（有已知残留）|
 | Phase 3：Android 本地相册自动备份（增量上传） | ⏳ 待开始 |
-| Phase 4：跨生态深度适配（Motion Photo ↔ Live Photo、折叠屏） | ⏳ 待开始 |
+| Phase 4：跨生态深度适配（Motion Photo ↔ Live Photo 单文件打包、EXIF 与旋转对齐） | 🟡 进行中 (下载端已完成) |
 
 ### Phase 2.6 交付清单（本轮 UI 与系统集成）
 

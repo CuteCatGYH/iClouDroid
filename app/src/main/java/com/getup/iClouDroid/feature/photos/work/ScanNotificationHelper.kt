@@ -105,6 +105,24 @@ object ScanNotificationHelper {
             .build()
     }
 
+    fun showOngoing(context: Context, progress: ScanProgress) {
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return
+        try {
+            manager.notify(NOTIFICATION_ID, buildOngoing(context, progress))
+        } catch (e: Exception) {
+            android.util.Log.w("ScanNotificationHelper", "Failed to post ongoing notification: ${e.message}")
+        }
+    }
+
+    fun showFinished(context: Context, scanned: Int) {
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return
+        try {
+            manager.notify(NOTIFICATION_ID, buildFinished(context, scanned))
+        } catch (e: Exception) {
+            android.util.Log.w("ScanNotificationHelper", "Failed to post finished notification: ${e.message}")
+        }
+    }
+
     fun cancel(context: Context) {
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
         manager.cancel(NOTIFICATION_ID)

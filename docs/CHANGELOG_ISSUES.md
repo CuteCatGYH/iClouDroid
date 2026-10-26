@@ -48,6 +48,8 @@
 | [ISS-033](#iss-033相册-ui-重构与日月视图monet-动态取色) | 相册 UI 重构，引入日/月视图、Monet 动态取色、本地相册管理 | 🟡 P2 | Android / UI | ✅ 已完成 |
 | [ISS-034](#iss-034photopicker-云端媒体提供方不被系统识别) | PhotoPicker 云端媒体提供方不被系统识别（白名单 + Shizuku 一键激活） | 🟠 P1 | Android / Provider | ✅ 已修复 |
 | [ISS-035](#iss-035photopicker-缩略图空白多层柹障式修复与已知残留) | **PhotoPicker 缩略图空白：多层柹障式修复与已知残留**（含桹障十二：视频被错报为图片）| 🔴 P0 | Android / Provider | ⚠️ 已修 12 层，待实机复测 |
+| [ISS-036](#iss-036-收藏操作导致-live_photo-媒体类型被冲刷覆写为-image) | 收藏操作导致 `LIVE_PHOTO` 媒体类型被冲刷覆写为 `IMAGE` | 🟠 P1 | Go / Repository | ✅ 已修复 |
+| [ISS-037](#iss-037-实况照片单文件-motion-photo-打包与-exif-防旋转对齐) | 实况照片单文件 Motion Photo 打包、全量 EXIF 保留与防旋转对齐 | 🟠 P1 | Android / MediaStore | ✅ 已修复 |
 
 ---
 
@@ -3299,4 +3301,63 @@ videoNames.forEach { name ->
 > 另一个可靠信号是**症状的分布**：任何“只在深滑/早期年份才出现”的缺陷，
 > 几乎都是**随页数或随时间累积**的（游标漂移、URL 过期、缓存腐坏），
 > 而不是“时序运气”——后者不会随滚动深度单调恶化。
+
+---
+
+## ISS-036：收藏操作导致 `LIVE_PHOTO` 媒体类型被冲刷覆写为 `IMAGE`
+
+**优先级**：🟠 P1
+**归属**：Go 核心解析层 (`go-core/photos.go`) & Android Repository (`PhotoRepository.kt`)
+**发现时间**：Phase 2.6 实况照片测试
+
+### 现象
+在画廊中将某张实况照片（Live Photo）设置为收藏 (`isFavorite`) 时，或者在 iOS / Web 上点赞后，本地刷新后照片左上角的 `LIVE` 徽章彻底消失，且无法播放实况视频。
+
+### 根因
+1. **CloudKit 增量同步契约**：当用户在 iCloud 中点赞或修改 `isFavorite` 时，CloudKit 的增量变更接口（`/records/changes`）**仅返回变动了的 `CPLAsset` 记录，而不返回未修改的 `CPLMaster` 记录**。
+2. **Go 侧 parseRecords 冒充**：`go-core/photos.go` 的 `parseRecords` 在解析记录时，由于 `masters` map 中没有当前增量批次未返回的 `CPLMaster`，将 `item.MediaType` 默认初始化为 `"IMAGE"`，且 `VideoComplURL` 为空。
+3. **Room `@Insert(onConflict = OnConflictStrategy.REPLACE)` 强制覆写**：Kotlin 层 `PhotoRepository.kt` 在将增量变更回写 SQLite 时，Room 默认用替换策略，将原本存在 SQLite 中的 `mediaType = "LIVE_PHOTO"` 和 `videoComplUrl` 强行覆盖改写为了 `"IMAGE"` 和 `null`！
+
+### 修复方案
+1. **Go 侧语义纠正**：在 `parseRecords` 中，当 `CPLMaster` 未随批次返回时，`MediaType` 不再冒充 `"IMAGE"`，而是留空 `""`，表明 Master 级元数据未在此增量包中。
+2. **Kotlin 侧智能合并**：在 `PhotoRepository` 中新增 `mergeWithExistingAssets()`。在执行 `photoDao.upsertAll()` 之前，先对比 DB 中已存在的行。若 incoming 数据缺失 Master 信息（如 `mediaType` 为空/`"IMAGE"` 且 `videoComplUrl` 为空），而 DB 已有记录为 `LIVE_PHOTO` / `VIDEO` 且持有 `videoComplUrl`，则**强行保留 DB 中的 `mediaType` 与 `videoComplUrl`**。
+
+### 验证结果
+单元测试 `PhotoParsingTest.kt` 新增 `live photo entity retains live photo properties and videoComplUrl` 护栏，实机测试对 Live Photo 多次点赞/取消点赞，`LIVE` 徽章保持稳定不消失。
+
+---
+
+## ISS-037：实况照片单文件 Motion Photo 打包、全量 EXIF 保留与防旋转对齐
+
+**优先级**：🟠 P1
+**归属**：Android MediaStore 下载层 (`MediaStoreDownloader.kt`) & 查看器 (`PhotoViewerPages.kt`)
+**发现时间**：Phase 2.6 实况照片测试
+
+### 现象
+1. **下载后相册出现两条独立文件**：下载实况照片后，系统相册中并排出现“一张照片”和“一段 2 秒视频”。
+2. **不预览无法下载 Live 视频**：如果未先在 App 内全屏播放过该 Live Photo，直接点下载保存下来的是静态图。
+3. **EXIF 拍摄信息全丢失**：下载保存的照片在系统相册“详细信息”中看不到相机设备、快门、光圈、ISO 和 GPS 坐标。
+4. **静态图像素旋转倒置**：有概率下载的静态图是侧躺/颠倒的，而实况视频又是正向的。
+
+### 根因
+1. **旧存储策略分离**：此前下载将静态图存入 `MediaStore.Images`，将补充视频存入 `MediaStore.Video`。Android 系统 MediaStore 视其为两个独立文件，因而展示为两块内容。
+2. **URL 刷新未强制带 `force = true`**：未全屏预览时，本地数据库中的 `videoComplUrl` 为空，普通 `refreshUrlsForMaster` 命中 DB 缓存直接返回 null。
+3. **`BitmapFactory` 剥离 EXIF**：将 HEIC/JPEG 转码解码为 Bitmap 时丢弃了 Exif 属性；且 iPhone 原始图像素按传感器方向物理排列，依赖 Exif `Orientation` 标记旋转。重编 JPEG 时既没旋转像素又丢失了 Orientation 标签，导致静态像素方向异常。
+
+### 修复方案
+1. **Google Motion Photo 单文件打包**：
+   - 增加 `packJpegMotionPhoto()`。在 JPEG APP1 插入 Google Motion Photo 规范 XMP (`GCamera:MotionPhoto="1"`, `GCamera:MicroVideoOffset`)，并在文件尾部追加 `.MOV` 视频补充包字节。
+   - 仅在 `MediaStore.Images` 中插入唯一一条记录。Google Photos、三星、小米相册等会自动将其识别为**单张动态照片**。
+2. **强制 URL 刷新**：
+   - 下载 Live Photo 时若 `videoComplUrl` 为空，强制调用 `repository.refreshUrlsForMaster(masterId, force = true)`，无需先在 App 内预览即可直接下载完整实况照片。
+3. **EXIF 属性全量复制与物理像素旋转**：
+   - 解码 `photoBytes` 时读取 `TAG_ORIENTATION`，使用 `Matrix().postRotate()` 将静态图像素**物理旋转至标准正方向**。
+   - 通过 `ExifInterface` 提取原图所有 Exif 字段（`Make` / `Model` / `ExposureTime` / `FNumber` / `ISO` / `DateTimeOriginal` / `GPS`），全量写回最终产物文件中，并将 `TAG_ORIENTATION` 重置为 `NORMAL (1)`。
+
+### 验证结果
+实机（三星 SM-F9760）验证通过：
+- 下载实况照片在相册中仅显示为**单一动态照片**。
+- 相册“详细信息”面板完美显示 iPhone 设备型号、快门、ISO、GPS 坐标。
+- 静态图与实况视频方向 100% 一致正向。
+
 

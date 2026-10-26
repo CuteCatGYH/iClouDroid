@@ -1,5 +1,7 @@
 package com.getup.iClouDroid.ui.auth
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,6 +16,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -35,7 +39,10 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -183,7 +190,7 @@ private fun NotLoggedInContent(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "提示：完成 2FA 验证后，请务必勾选‘信任此浏览器’，以便保存长效凭证。",
+                        text = "提示：完成 2FA 验证后，请务必勾选‘信任此浏览器’，以便保存长效凭证。登录完成后请在下方折叠菜单中点击“提取 cookie”",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSecondaryContainer
                     )
@@ -216,6 +223,8 @@ private fun CookieDiagnosticsCard(
     result: CookieValidationResult,
     onForceExtract: () -> Unit
 ) {
+    var expanded by rememberSaveable { mutableStateOf(false) }
+
     Card(
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.tertiaryContainer
@@ -224,58 +233,80 @@ private fun CookieDiagnosticsCard(
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 4.dp)
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Text(
-                text = "Cookie 提取诊断 (已捕获 ${result.cookieNames.size} 项)",
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onTertiaryContainer
-            )
-
-            Spacer(modifier = Modifier.height(6.dp))
-
-            CookieStatusRow(
-                name = COOKIE_AUTH_TOKEN,
-                present = result.hasAuthToken,
-                length = result.valueLength(COOKIE_AUTH_TOKEN)
-            )
-            CookieStatusRow(
-                name = COOKIE_HSA_TRUST,
-                present = result.hasHsaTrust,
-                length = result.valueLength(COOKIE_HSA_TRUST)
-            )
-            CookieStatusRow(
-                name = COOKIE_PCS_CLOUDKIT,
-                present = result.hasPcsCloudKit,
-                length = result.valueLength(COOKIE_PCS_CLOUDKIT)
-            )
-
-            if (!result.expiresSummary.isNullOrBlank()) {
-                Spacer(modifier = Modifier.height(4.dp))
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded }
+                    .padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
                 Text(
-                    text = "提示: ${result.expiresSummary}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                    text = "Cookie 提取诊断 (已捕获 ${result.cookieNames.size} 项)",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                    modifier = Modifier.weight(1f)
+                )
+
+                Icon(
+                    imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    contentDescription = if (expanded) "折叠" else "展开",
+                    tint = MaterialTheme.colorScheme.onTertiaryContainer
                 )
             }
 
-            Spacer(modifier = Modifier.height(4.dp))
+            AnimatedVisibility(visible = expanded) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 12.dp, end = 12.dp, bottom = 12.dp)
+                ) {
+                    CookieStatusRow(
+                        name = COOKIE_AUTH_TOKEN,
+                        present = result.hasAuthToken,
+                        length = result.valueLength(COOKIE_AUTH_TOKEN)
+                    )
+                    CookieStatusRow(
+                        name = COOKIE_HSA_TRUST,
+                        present = result.hasHsaTrust,
+                        length = result.valueLength(COOKIE_HSA_TRUST)
+                    )
+                    CookieStatusRow(
+                        name = COOKIE_PCS_CLOUDKIT,
+                        present = result.hasPcsCloudKit,
+                        length = result.valueLength(COOKIE_PCS_CLOUDKIT)
+                    )
 
-            Text(
-                text = if (result.missingKeys.isEmpty()) {
-                    "三要素齐全，正在提交 Go 核心层…"
-                } else {
-                    "缺少: ${result.missingKeys.joinToString(", ")}" +
-                        if (!result.hasHsaTrust) "（请确认登录时勾选了“信任此浏览器”）" else ""
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onTertiaryContainer
-            )
+                    if (!result.expiresSummary.isNullOrBlank()) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "提示: ${result.expiresSummary}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer
+                        )
+                    }
 
-            Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(4.dp))
 
-            OutlinedButton(onClick = onForceExtract) {
-                Text("强制提取 Cookie")
+                    Text(
+                        text = if (result.missingKeys.isEmpty()) {
+                            "三要素齐全，正在提交 Go 核心层…"
+                        } else {
+                            "缺少: ${result.missingKeys.joinToString(", ")}" +
+                                if (!result.hasHsaTrust) "（请确认登录时勾选了“信任此浏览器”）" else ""
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    OutlinedButton(onClick = onForceExtract) {
+                        Text("提取 Cookie")
+                    }
+                }
             }
         }
     }

@@ -84,6 +84,14 @@ fun AppShell(
     val syncMessage by photosViewModel.syncMessage.collectAsStateWithLifecycle()
     val isSyncing by photosViewModel.isSyncing.collectAsStateWithLifecycle()
     val scanProgress by photosViewModel.scanProgress.collectAsStateWithLifecycle()
+    val navBarDestinations by settings.navBarDestinations.collectAsStateWithLifecycle()
+
+    // If the currently selected destination is no longer enabled, switch to the first enabled one
+    androidx.compose.runtime.LaunchedEffect(navBarDestinations) {
+        if (selected !in navBarDestinations && navBarDestinations.isNotEmpty()) {
+            selected = navBarDestinations.first()
+        }
+    }
 
     Box(modifier = modifier.fillMaxSize()) {
         // Height the navigation bar occupies. Reserved manually so content is never laid out
@@ -108,8 +116,10 @@ fun AppShell(
                         contentPadding = PaddingValues(bottom = navBarPadding)
                     )
                 }
-                AppDestination.Drive -> PlaceholderScreen(AppDestination.Drive)
-                AppDestination.Notes -> PlaceholderScreen(AppDestination.Notes)
+                AppDestination.Drive -> FeatureWebViewScreen(url = "https://www.icloud.com.cn/iclouddrive/")
+                AppDestination.Notes -> FeatureWebViewScreen(url = "https://www.icloud.com.cn/notes/")
+                AppDestination.Reminders -> FeatureWebViewScreen(url = "https://www.icloud.com.cn/reminders/")
+                AppDestination.FindMy -> FeatureWebViewScreen(url = "https://www.icloud.com.cn/find/")
             }
         }
 
@@ -119,7 +129,7 @@ fun AppShell(
                 onStartFullScan = { photosViewModel.startFullScan() },
                 settings = settings,
                 fullScanMessage = syncMessage,
-                isFullScanRunning = isSyncing || scanProgress.isScanning,
+                isFullScanRunning = isSyncing || scanProgress.isScanning || scanProgress.isCachingCovers,
                 onFrequencyChanged = { newFrequency ->
                     settings.setScanFrequency(newFrequency)
                     PeriodicScanScheduler.apply(context, settings)
@@ -137,7 +147,7 @@ fun AppShell(
 
         if (!viewerOpen && !settingsOpen) {
             NavigationBar(modifier = Modifier.align(Alignment.BottomCenter)) {
-                AppDestination.entries.forEach { destination ->
+                AppDestination.entries.filter { it in navBarDestinations }.forEach { destination ->
                     NavigationBarItem(
                         selected = selected == destination,
                         onClick = { selected = destination },

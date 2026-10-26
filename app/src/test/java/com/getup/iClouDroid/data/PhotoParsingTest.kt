@@ -72,4 +72,50 @@ class PhotoParsingTest {
         // Should fall back to medUrl
         assertEquals("https://cvws.example.com/med.jpg", thumbModel.url)
     }
+
+    @Test
+    fun `live photo entity retains live photo properties and videoComplUrl`() {
+        val livePhoto = PhotoAssetEntity(
+            id = "live-asset-1",
+            masterId = "live-master-1",
+            filename = "IMG_2102.HEIC",
+            assetDate = 1700000000000L,
+            addedDate = 1700000000000L,
+            isFavorite = false,
+            isHidden = false,
+            duration = 0,
+            mediaType = "LIVE_PHOTO",
+            itemType = "public.heic",
+            width = 4032,
+            height = 3024,
+            size = 2700000L,
+            thumbUrl = "https://cvws.example.com/thumb.jpg",
+            medUrl = "https://cvws.example.com/med.jpg",
+            originalUrl = "https://cvws.example.com/orig.heic",
+            videoComplUrl = "https://cvws.example.com/video_compl.mov"
+        )
+
+        assertEquals("LIVE_PHOTO", livePhoto.mediaType)
+        assertNotNull(livePhoto.videoComplUrl)
+        assertEquals("https://cvws.example.com/video_compl.mov", livePhoto.videoComplUrl)
+
+        // Simulating incremental update where CPLMaster is omitted (e.g. favorite toggled)
+        val incrementalUpdate = livePhoto.copy(
+            isFavorite = true,
+            mediaType = "IMAGE", // Defaults when master missing
+            videoComplUrl = null
+        )
+
+        // Merging logic protection: if existing is LIVE_PHOTO and incoming is IMAGE/null, retain LIVE_PHOTO
+        val mergedMediaType = if (incrementalUpdate.mediaType == "IMAGE" && livePhoto.mediaType == "LIVE_PHOTO") {
+            livePhoto.mediaType
+        } else {
+            incrementalUpdate.mediaType
+        }
+        val mergedVideoComplUrl = incrementalUpdate.videoComplUrl ?: livePhoto.videoComplUrl
+
+        assertEquals("LIVE_PHOTO", mergedMediaType)
+        assertEquals("https://cvws.example.com/video_compl.mov", mergedVideoComplUrl)
+        assertEquals(true, incrementalUpdate.isFavorite)
+    }
 }

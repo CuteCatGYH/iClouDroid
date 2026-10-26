@@ -9,6 +9,9 @@ package com.getup.iClouDroid.ui.settings
  * silently not rendered.
  */
 enum class SettingsItem {
+    /** Open iCloud web version in an in-app WebView. */
+    ICLOUD_WEB,
+
     /** Theme mode: Follow system / Light / Dark. */
     THEME_MODE,
 
@@ -33,7 +36,10 @@ enum class SettingsItem {
     SCAN_FREQUENCY,
 
     /** Interval in days; only meaningful while the frequency is 自定义. */
-    CUSTOM_INTERVAL
+    CUSTOM_INTERVAL,
+
+    /** Bottom navigation bar items visibility toggle. */
+    NAV_BAR_ITEMS
 }
 
 /** One titled block of rows. */
@@ -52,6 +58,16 @@ data class SettingsGroup(
 object SettingsCatalog {
 
     val groups: List<SettingsGroup> = listOf(
+        SettingsGroup(
+            title = "快捷访问",
+            description = "在应用内快速访问 iCloud 官方网页版",
+            items = listOf(SettingsItem.ICLOUD_WEB)
+        ),
+        SettingsGroup(
+            title = "导航栏",
+            description = "自定义底部导航栏显示的模块",
+            items = listOf(SettingsItem.NAV_BAR_ITEMS)
+        ),
         SettingsGroup(
             title = "外观与个性化",
             description = "设置应用的深浅主题模式与 Android 12+ Monet 动态壁纸取色效果。",

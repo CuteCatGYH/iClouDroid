@@ -757,7 +757,7 @@ class PhotoRepository(
 
             Log.d(TAG, "Initial page fetched: ${photos.size} photos, hasMore=$hasMore")
 
-            photoDao.upsertAll(photos)
+            upsertPhotosWithMerge(photos)
             syncStateDao.setSyncState(
                 SyncStateEntity(
                     key = KEY_PRIMARY_SYNC,
@@ -826,7 +826,7 @@ class PhotoRepository(
             val syncToken = json.optString("syncToken", state.syncToken ?: "")
 
             Log.d(TAG, "Next page returned: ${photos.size} photos, hasMore=$hasMore")
-            photoDao.upsertAll(photos)
+            upsertPhotosWithMerge(photos)
 
             syncStateDao.setSyncState(
                 SyncStateEntity(
@@ -939,7 +939,7 @@ class PhotoRepository(
     internal suspend fun recordScanPage(page: ScanPage): Int {
         val now = System.currentTimeMillis()
         if (page.entities.isNotEmpty()) {
-            photoDao.upsertAll(page.entities)
+            upsertPhotosWithMerge(page.entities)
             scanSeenIdDao.upsertAll(
                 page.entities.map { ScanSeenIdEntity(it.id, it.masterId, now) }
             )
@@ -1124,7 +1124,7 @@ class PhotoRepository(
 
                     if (upsertable.isNotEmpty()) {
                         Log.d(TAG, "Upserting ${upsertable.size} new/modified photos to local db")
-                        photoDao.upsertAll(upsertable)
+                        upsertPhotosWithMerge(upsertable)
                         // Keep the month sections in step, or the synced photos stay stranded at
                         // yearMonth = 0 and never appear in the gallery (P2-016).
                         rebuildMonthIndexFor(upsertable.map { it.yearMonth }.distinct())
@@ -1675,6 +1675,43 @@ class PhotoRepository(
             }
         }
         return list
+    }
+
+    /**
+     * Merges incoming photo entities with existing DB rows before upserting.
+     *
+     * Protects master-level metadata (such as `mediaType == "LIVE_PHOTO"`, `videoComplUrl`, URLs,
+     * filename, dimensions) from being overwritten by incremental change feeds (`/records/changes`)
+     * that only deliver updated `CPLAsset` fields (e.g. `isFavorite`) without a `CPLMaster` payload.
+     */
+    private suspend fun mergeWithExistingAssets(incoming: List<PhotoAssetEntity>): List<PhotoAssetEntity> {
+        if (incoming.isEmpty()) return emptyList()
+        return incoming.map { item ->
+            val existing = photoDao.getPhotoById(item.id) ?: return@map item
+            val effectiveMediaType = if (item.mediaType.isBlank() || (item.mediaType == "IMAGE" && (existing.mediaType == "LIVE_PHOTO" || existing.mediaType == "VIDEO"))) {
+                existing.mediaType
+            } else {
+                item.mediaType
+            }
+            item.copy(
+                mediaType = effectiveMediaType,
+                videoComplUrl = item.videoComplUrl ?: existing.videoComplUrl,
+                thumbUrl = item.thumbUrl ?: existing.thumbUrl,
+                medUrl = item.medUrl ?: existing.medUrl,
+                originalUrl = item.originalUrl ?: existing.originalUrl,
+                filename = if (item.filename == item.id && existing.filename != existing.id) existing.filename else item.filename,
+                itemType = if (item.itemType.isBlank()) existing.itemType else item.itemType,
+                width = if (item.width == 0) existing.width else item.width,
+                height = if (item.height == 0) existing.height else item.height,
+                size = if (item.size == 0L) existing.size else item.size
+            )
+        }
+    }
+
+    private suspend fun upsertPhotosWithMerge(photos: List<PhotoAssetEntity>) {
+        if (photos.isEmpty()) return
+        val merged = mergeWithExistingAssets(photos)
+        photoDao.upsertAll(merged)
     }
 
     /**

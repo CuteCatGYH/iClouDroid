@@ -5,6 +5,7 @@ import android.os.Build
 import android.provider.MediaStore
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -19,8 +20,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Refresh
+import com.getup.iClouDroid.IClouDroidApp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -78,6 +81,7 @@ fun SettingsScreen(
     val themeMode by settings.themeMode.collectAsStateWithLifecycle()
     val useDynamicColor by settings.useDynamicColor.collectAsStateWithLifecycle()
     val monthCoverEnabled by settings.monthCoverEnabled.collectAsStateWithLifecycle()
+    val navBarDestinations by settings.navBarDestinations.collectAsStateWithLifecycle()
 
     var showScanWarning by remember { mutableStateOf(false) }
 
@@ -153,6 +157,7 @@ fun SettingsScreen(
                                 themeMode = themeMode,
                                 useDynamicColor = useDynamicColor,
                                 monthCoverEnabled = monthCoverEnabled,
+                                navBarDestinations = navBarDestinations,
                                 frequency = frequency,
                                 customDays = customDays,
                                 isFullScanRunning = isFullScanRunning,
@@ -248,6 +253,7 @@ private fun SettingsRow(
     themeMode: ThemeMode,
     useDynamicColor: Boolean,
     monthCoverEnabled: Boolean,
+    navBarDestinations: Set<com.getup.iClouDroid.ui.navigation.AppDestination>,
     frequency: ScanFrequency,
     customDays: Int,
     isFullScanRunning: Boolean,
@@ -258,6 +264,73 @@ private fun SettingsRow(
     val context = LocalContext.current
 
     when (item) {
+        SettingsItem.ICLOUD_WEB -> {
+            var showICloudWebDialog by remember { mutableStateOf(false) }
+            val isChinaMainland = remember(context) {
+                (context.applicationContext as? IClouDroidApp)
+                    ?.container?.sessionManager?.isChinaMainland() ?: true
+            }
+            val targetUrl = if (isChinaMainland) "https://www.icloud.com.cn" else "https://www.icloud.com"
+
+            ActionRow(
+                title = "访问 iCloud 网页版",
+                subtitle = if (isChinaMainland) "https://www.icloud.com.cn" else "https://www.icloud.com",
+                trailing = {
+                    Icon(
+                        Icons.AutoMirrored.Filled.OpenInNew,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                },
+                onClick = {
+                    showICloudWebDialog = true
+                }
+            )
+
+            if (showICloudWebDialog) {
+                ICloudWebDialog(
+                    url = targetUrl,
+                    onDismiss = { showICloudWebDialog = false }
+                )
+            }
+        }
+
+        SettingsItem.NAV_BAR_ITEMS -> {
+            Column(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                com.getup.iClouDroid.ui.navigation.AppDestination.entries.forEach { dest ->
+                    val isPhotos = dest == com.getup.iClouDroid.ui.navigation.AppDestination.Photos
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(imageVector = dest.icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.width(16.dp))
+                        Text(
+                            text = dest.label,
+                            style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Switch(
+                            checked = isPhotos || dest in navBarDestinations,
+                            enabled = !isPhotos,
+                            onCheckedChange = { checked ->
+                                val newSet = if (checked) {
+                                    navBarDestinations + dest
+                                } else {
+                                    navBarDestinations - dest
+                                }
+                                if (newSet.isNotEmpty()) {
+                                    settings.setNavBarDestinations(newSet)
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+        }
+
         SettingsItem.THEME_MODE -> DropdownRow(
             title = "主题外观",
             subtitle = "切换应用深色、浅色或跟随系统",
@@ -610,4 +683,59 @@ private fun CloudMediaActivationDialog(
             }
         }
     )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ICloudWebDialog(
+    url: String,
+    onDismiss: () -> Unit
+) {
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(
+            usePlatformDefaultWidth = false
+        )
+    ) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = {
+                        Column {
+                            Text(
+                                text = "iCloud 网页版",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = url,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = onDismiss) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "关闭"
+                            )
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.surface
+                    )
+                )
+            },
+            modifier = Modifier.fillMaxSize()
+        ) { innerPadding ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+            ) {
+                com.getup.iClouDroid.ui.FeatureWebViewScreen(url = url)
+            }
+        }
+    }
 }

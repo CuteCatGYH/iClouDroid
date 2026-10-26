@@ -7,6 +7,7 @@ import androidx.annotation.OptIn
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroid
@@ -16,12 +17,15 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -41,6 +45,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -52,6 +57,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
@@ -149,6 +155,52 @@ fun ImageViewerPage(
     var isUrlIssue by remember(photo.id) { mutableStateOf(false) }
     var degradedToMedium by remember(photo.id) { mutableStateOf(false) }
     var isDegrading by remember(photo.id) { mutableStateOf(false) }
+
+    // Live Photo state and playback
+    val isLivePhoto = photo.mediaType == "LIVE_PHOTO" || !photo.videoComplUrl.isNullOrBlank()
+    var liveVideoUrl by remember(photo.id) { mutableStateOf(photo.videoComplUrl) }
+    var isLivePlaying by remember(photo.id) { mutableStateOf(false) }
+
+    val livePlayer = remember(liveVideoUrl, isLivePlaying, isActive) {
+        val url = liveVideoUrl
+        if (!isLivePhoto || !isLivePlaying || !isActive || url.isNullOrBlank()) null
+        else {
+            ExoPlayer.Builder(context).build().apply {
+                setMediaItem(MediaItem.fromUri(url))
+                prepare()
+                playWhenReady = true
+                repeatMode = Player.REPEAT_MODE_OFF
+                addListener(object : Player.Listener {
+                    override fun onPlaybackStateChanged(state: Int) {
+                        if (state == Player.STATE_ENDED) {
+                            isLivePlaying = false
+                        }
+                    }
+
+                    override fun onPlayerError(error: PlaybackException) {
+                        Log.w(TAG, "Live Photo playback error: ${error.message}")
+                        val code = (error.cause as? HttpDataSource.InvalidResponseCodeException)?.responseCode
+                        if (code == 403 || code == 410) {
+                            scope.launch {
+                                val refreshed = repository.refreshUrlsForMaster(photo.masterId, force = true).getOrNull()
+                                if (refreshed != null && !refreshed.videoComplUrl.isNullOrBlank()) {
+                                    liveVideoUrl = refreshed.videoComplUrl
+                                } else {
+                                    isLivePlaying = false
+                                }
+                            }
+                        } else {
+                            isLivePlaying = false
+                        }
+                    }
+                })
+            }
+        }
+    }
+
+    DisposableEffect(livePlayer) {
+        onDispose { livePlayer?.release() }
+    }
 
     // Base layer is ready once it has painted something. Until then the screen stays black rather
     // than flashing a spinner or a white frame during the hero transition.
@@ -355,7 +407,7 @@ fun ImageViewerPage(
                     }
                 }
             }
-            .pointerInput(photo.id) {
+            .pointerInput(photo.id, isLivePhoto, liveVideoUrl) {
                 // Double-tap zooms about the tapped point. `detectTapGestures` is a separate
                 // pointerInput so it does not compete with the transform detector above.
                 detectTapGestures(
@@ -364,7 +416,22 @@ fun ImageViewerPage(
                         // cut, while a short spring makes the gesture feel like it "did" something.
                         scope.launch { zoom.animateToggle(point) }
                     },
-                    onTap = { onToggleChrome() }
+                    onTap = { onToggleChrome() },
+                    onLongPress = {
+                        if (isLivePhoto) {
+                            if (liveVideoUrl.isNullOrBlank()) {
+                                scope.launch {
+                                    val refreshed = repository.refreshUrlsForMaster(photo.masterId, force = true).getOrNull()
+                                    if (!refreshed?.videoComplUrl.isNullOrBlank()) {
+                                        liveVideoUrl = refreshed?.videoComplUrl
+                                        isLivePlaying = true
+                                    }
+                                }
+                            } else {
+                                isLivePlaying = true
+                            }
+                        }
+                    }
                 )
             },
         contentAlignment = Alignment.Center
@@ -502,12 +569,70 @@ fun ImageViewerPage(
                 .graphicsLayer { alpha = sharpAlpha }
         )
 
+        if (isLivePlaying && livePlayer != null) {
+            AndroidView(
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        player = livePlayer
+                        useController = false
+                        layoutParams = FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT
+                        )
+                    }
+                },
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+
         if (!baseReady && !sharpVisible && !loadFailed) {
             // Nothing at all to show yet: stay black instead of a spinner. This is the frame or
             // two after the hero transition starts, before the cached bitmap is painted.
             Box(modifier = Modifier.fillMaxSize().background(Color.Black))
         }
         } // end transform container
+
+        if (isLivePhoto) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(top = 16.dp, start = 16.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(Color.Black.copy(alpha = 0.65f))
+                    .clickable {
+                        if (liveVideoUrl.isNullOrBlank()) {
+                            scope.launch {
+                                val refreshed = repository.refreshUrlsForMaster(photo.masterId, force = true).getOrNull()
+                                if (!refreshed?.videoComplUrl.isNullOrBlank()) {
+                                    liveVideoUrl = refreshed?.videoComplUrl
+                                    isLivePlaying = !isLivePlaying
+                                }
+                            }
+                        } else {
+                            isLivePlaying = !isLivePlaying
+                        }
+                    }
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = "Live Photo",
+                        tint = Color.White,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Text(
+                        text = if (isLivePlaying) "LIVE 播放中" else "LIVE (点击/长按播放)",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
     }
 }
 

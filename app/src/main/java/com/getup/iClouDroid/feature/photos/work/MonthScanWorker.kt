@@ -51,7 +51,7 @@ class MonthScanWorker(
         val progressJob = launch {
             try {
                 engine.progress.collect { progress ->
-                    if (progress.isScanning) {
+                    if (progress.isScanning || progress.isCachingCovers) {
                         try {
                             setForeground(
                                 ForegroundInfo(
@@ -76,24 +76,35 @@ class MonthScanWorker(
             setForeground(createForegroundInfo(engine))
 
             val force = inputData.getBoolean("force", false)
-            val result = engine.scanAll(force = force)
+            var result = engine.scanAll(force = force)
+
+            // If another job (e.g. PhotosViewModel) was running the scan or if cover caching is active,
+            // keep the worker alive as a foreground service so WorkManager does not strip the notification.
+            while (engine.progress.value.isScanning || engine.progress.value.isCachingCovers) {
+                kotlinx.coroutines.delay(500)
+                if (!engine.progress.value.isComplete && !engine.progress.value.isScanning && !engine.progress.value.isCachingCovers) {
+                    result = engine.scanAll(force = false)
+                }
+            }
 
             progressJob.cancel()
 
-            if (result.isSuccess) {
-                val scanned = engine.progress.value.scanned
-                Log.i(TAG, "Background scan finished, scanned=$scanned")
-
-                if (scanned > 0) {
+            val finalProgress = engine.progress.value
+            if (finalProgress.isComplete) {
+                Log.i(TAG, "Background scan finished complete, scanned=${finalProgress.scanned}")
+                if (finalProgress.scanned > 0) {
                     val manager = applicationContext.getSystemService(NotificationManager::class.java)
                     manager?.notify(
                         ScanNotificationHelper.NOTIFICATION_ID,
-                        ScanNotificationHelper.buildFinished(applicationContext, scanned)
+                        ScanNotificationHelper.buildFinished(applicationContext, finalProgress.scanned)
                     )
                 } else {
                     ScanNotificationHelper.cancel(applicationContext)
                 }
-
+                Result.success()
+            } else if (result.isSuccess) {
+                Log.i(TAG, "Background scan paused at scanned=${finalProgress.scanned}")
+                ScanNotificationHelper.cancel(applicationContext)
                 Result.success()
             } else if (runAttemptCount < MAX_ATTEMPTS) {
                 Log.w(TAG, "Background scan failed, will retry (attempt $runAttemptCount)")

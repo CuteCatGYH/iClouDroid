@@ -159,13 +159,35 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
     private var scanJob: Job? = null
 
     init {
+        // Continuously observe scanEngine.progress across the whole ViewModel lifecycle so
+        // progress messages, cover caching state, and status notifications stay live everywhere.
+        viewModelScope.launch {
+            scanEngine.progress.collect { progress ->
+                val context = getApplication<Application>()
+                if (progress.isScanning) {
+                    _syncMessage.value = buildProgressMessage(progress)
+                    ScanNotificationHelper.showOngoing(context, progress)
+                } else if (progress.isCachingCovers) {
+                    _syncMessage.value = "正在缓存月份封面…"
+                    ScanNotificationHelper.showOngoing(context, progress)
+                } else if (progress.isComplete) {
+                    _syncMessage.value = "全盘扫描完成，共 ${totalCount.value} 项"
+                    if (progress.scanned > 0) {
+                        ScanNotificationHelper.showFinished(context, progress.scanned)
+                    } else {
+                        ScanNotificationHelper.cancel(context)
+                    }
+                } else if (progress.scanned > 0) {
+                    _syncMessage.value = "已扫描 ${progress.scanned} 项，稍后自动继续"
+                    ScanNotificationHelper.cancel(context)
+                }
+            }
+        }
+
         viewModelScope.launch {
             // Restore the persisted estimate first so the progress bar has a denominator even
             // before this run produces any progress of its own.
             scanEngine.restoreProgress()
-            if (!scanEngine.progress.value.isScanning) {
-                ScanNotificationHelper.cancel(getApplication())
-            }
 
             // Bucket any rows left over from a v3→v4 upgrade (or an interrupted scan) before the
             // UI reads the index. Without this an upgraded install shows a populated count but an
@@ -174,11 +196,6 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
 
             // Start the scan whenever it is not already finished — NOT only when the library is
             // empty.
-            //
-            // The original condition was `currentCount == 0`, which is wrong for the v3→v4
-            // upgrade: an existing install has rows but no `yearMonth` and no month index, so the
-            // gallery renders empty while the count reads 50. It also silently skipped resuming an
-            // interrupted scan (a killed app leaves a partial library behind).
             repository.totalCountFlow.collect { _ ->
                 if (!hasAutoStarted && !_isSyncing.value) {
                     hasAutoStarted = true
@@ -361,17 +378,7 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
 
                 _syncMessage.value = "正在扫描照片库..."
 
-                // Observe progress while the scan runs, so the banner tracks it.
-                val progressJob = launch {
-                    scanEngine.progress.collect { p ->
-                        if (p.isScanning) {
-                            _syncMessage.value = buildProgressMessage(p)
-                        }
-                    }
-                }
-
                 val result = scanEngine.scanAll()
-                progressJob.cancel()
 
                 if (result.isSuccess) {
                     val progress = scanEngine.progress.value
@@ -466,14 +473,7 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
                     return@launch
                 }
 
-                val progressJob = launch {
-                    scanEngine.progress.collect { p ->
-                        if (p.isScanning) _syncMessage.value = buildProgressMessage(p)
-                    }
-                }
-
                 val result = scanEngine.scanAll(force = true)
-                progressJob.cancel()
 
                 if (result.isSuccess) {
                     val progress = scanEngine.progress.value
@@ -485,7 +485,6 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
                 } else {
                     _syncMessage.value = "扫描失败: ${result.exceptionOrNull()?.message}"
                 }
-                ScanNotificationHelper.cancel(getApplication())
             } catch (e: Exception) {
                 Log.e(TAG, "startFullScan exception", e)
                 _syncMessage.value = "异常: ${e.message}"

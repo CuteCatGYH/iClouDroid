@@ -267,7 +267,7 @@
 
 - [ ] **Motion Photo ↔ Live Photo 互转**
   - [ ] **上传（安卓 → iCloud）**：检测 `MotionPhoto_Data` / `MicroVideoOffset` XMP 标签，剥离尾部 MP4 → `MediaMuxer`/`FFmpeg` 转 `.MOV`，写入 `com.apple.quicktime.content.identifier` UUID，JPEG 注入匹配 `MakerApple` ContentIdentifier
-  - [ ] **下载（iCloud → 安卓）**：`CPLMaster` 含 `resOriginalVidComplRes` 时同时下载图+视频，按三星/Google Motion Photo 规范拼接单文件并写 XMP 偏移量
+  - [x] **下载（iCloud → 安卓）**：`CPLMaster` 含 `resOriginalVidComplRes` 时同时下载图+视频，按 Google/三星 Motion Photo 规范插入 APP1 XMP (`GCamera:MotionPhoto="1"`) 拼接单文件，全量复制 EXIF 并将 Bitmap 物理旋转至正向（详见 [ISS-037](CHANGELOG_ISSUES.md#iss-037-实况照片单文件-motion-photo-打包与-exif-防旋转对齐)）
 - [ ] **折叠屏与大屏自适应布局**
   - [ ] `WindowSizeClass` 适配：外屏单栏底部导航 / 内屏与平板 `NavigationRail` + 双栏详情
 
