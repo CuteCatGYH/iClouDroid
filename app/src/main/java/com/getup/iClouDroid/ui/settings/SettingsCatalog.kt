@@ -48,7 +48,19 @@ enum class SettingsItem {
     BACKUP_REQUIRE_CHARGING,
 
     /** Require battery not low for auto-backup. */
-    BACKUP_BATTERY_NOT_LOW
+    BACKUP_BATTERY_NOT_LOW,
+
+    /** Maximum concurrent photo uploads (1 to 3). */
+    BACKUP_CONCURRENT_LIMIT,
+
+    /** Show persistent progress notification during background backup. */
+    BACKUP_NOTIFICATION,
+
+    /** Request ignore battery optimizations to keep app alive in background. */
+    BATTERY_OPTIMIZATION,
+
+    /** Periodic backup interval in minutes. */
+    PERIODIC_BACKUP_INTERVAL
 }
 
 /** One titled block of rows. */
@@ -91,9 +103,13 @@ object SettingsCatalog {
             title = "自动备份策略",
             description = "配置本地相册后台备份时的网络与电量运行约束条件。",
             items = listOf(
+                SettingsItem.BATTERY_OPTIMIZATION,
+                SettingsItem.PERIODIC_BACKUP_INTERVAL,
                 SettingsItem.BACKUP_CELLULAR_DATA,
                 SettingsItem.BACKUP_REQUIRE_CHARGING,
-                SettingsItem.BACKUP_BATTERY_NOT_LOW
+                SettingsItem.BACKUP_BATTERY_NOT_LOW,
+                SettingsItem.BACKUP_CONCURRENT_LIMIT,
+                SettingsItem.BACKUP_NOTIFICATION
             )
         ),
         SettingsGroup(

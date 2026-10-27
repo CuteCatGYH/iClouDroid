@@ -105,6 +105,11 @@ fun LocalAlbumsScreen(
     // Whether the "you cannot grant this any more" explanation is on screen.
     var locationDeniedDialog by remember { mutableStateOf(false) }
 
+    // Battery optimization prompt state
+    var showBatteryOptimizationPrompt by remember { mutableStateOf(false) }
+    var pendingBatteryBucket by remember { mutableStateOf<String?>(null) }
+    var hasPromptedBattery by remember { mutableStateOf(false) }
+
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) {
@@ -124,14 +129,21 @@ fun LocalAlbumsScreen(
         hasLocationPermission = granted
         val bucket = awaitingLocationBucket
         awaitingLocationBucket = null
-        if (granted) {
-            bucket?.let { viewModel.toggleAlbumBackup(it, true) }
-        } else {
+        if (!granted) {
             locationPermanentlyDenied = true
             // Say so immediately. On a second refusal the platform returns denied without
             // showing anything at all - no dialog, no error - so without this the user taps
             // 允许 and simply nothing happens.
             locationDeniedDialog = true
+        }
+
+        val powerManager = context.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
+        if (!hasPromptedBattery && !powerManager.isIgnoringBatteryOptimizations(context.packageName)) {
+            pendingBatteryBucket = bucket
+            showBatteryOptimizationPrompt = true
+            hasPromptedBattery = true
+        } else {
+            bucket?.let { viewModel.toggleAlbumBackup(it, true) }
         }
     }
 
@@ -147,7 +159,7 @@ fun LocalAlbumsScreen(
                 title = {
                     Column {
                         Text(
-                            text = "Albums",
+                            text = "本地相册备份",
                             fontWeight = FontWeight.Bold,
                             style = MaterialTheme.typography.headlineMedium
                         )
@@ -178,7 +190,14 @@ fun LocalAlbumsScreen(
                 },
                 onAllowWithout = {
                     pendingLocationBucket = null
-                    viewModel.toggleAlbumBackup(bucket, true)
+                    val powerManager = context.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
+                    if (!hasPromptedBattery && !powerManager.isIgnoringBatteryOptimizations(context.packageName)) {
+                        pendingBatteryBucket = bucket
+                        showBatteryOptimizationPrompt = true
+                        hasPromptedBattery = true
+                    } else {
+                        viewModel.toggleAlbumBackup(bucket, true)
+                    }
                 },
                 onDismiss = { pendingLocationBucket = null }
             )
@@ -302,7 +321,14 @@ fun LocalAlbumsScreen(
                                     if (enabled && !hasLocationPermission && !locationPermanentlyDenied) {
                                         pendingLocationBucket = album.bucketId
                                     } else {
-                                        viewModel.toggleAlbumBackup(album.bucketId, enabled)
+                                        val powerManager = context.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
+                                        if (enabled && !hasPromptedBattery && !powerManager.isIgnoringBatteryOptimizations(context.packageName)) {
+                                            pendingBatteryBucket = album.bucketId
+                                            showBatteryOptimizationPrompt = true
+                                            hasPromptedBattery = true
+                                        } else {
+                                            viewModel.toggleAlbumBackup(album.bucketId, enabled)
+                                        }
                                     }
                                 }
                             )
@@ -321,6 +347,51 @@ fun LocalAlbumsScreen(
                     onClearAll = { viewModel.clearAllTasks() },
                     forceUploadUntil = forceUploadUntil,
                     onForceUpload = { viewModel.triggerForceUploadForOneHour() }
+                )
+            }
+
+            if (showBatteryOptimizationPrompt) {
+                androidx.compose.material3.AlertDialog(
+                    onDismissRequest = {
+                        showBatteryOptimizationPrompt = false
+                        pendingBatteryBucket?.let { viewModel.toggleAlbumBackup(it, true) }
+                        pendingBatteryBucket = null
+                    },
+                    title = { Text("提示: 开启常驻后台更稳定") },
+                    text = {
+                        Text(
+                            "我们检测到您正在开启自动备份。\n\n" +
+                            "为了确保照片能及时、稳定地在后台实时上传，是否允许 iClouDroid 忽略电池优化，保持常驻后台运行？\n\n" +
+                            "如果不开启，系统可能会在息屏后暂停备份，需要重新打开应用才会继续。"
+                        )
+                    },
+                    confirmButton = {
+                        androidx.compose.material3.TextButton(
+                            onClick = {
+                                try {
+                                    val intent = android.content.Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                                        data = android.net.Uri.parse("package:${context.packageName}")
+                                    }
+                                    context.startActivity(intent)
+                                } catch (e: Exception) {
+                                    android.util.Log.e("LocalAlbumsScreen", "Failed to launch battery optimization intent", e)
+                                    android.widget.Toast.makeText(context, "设备不支持直接跳转，请到系统设置中手动开启", android.widget.Toast.LENGTH_SHORT).show()
+                                }
+                                showBatteryOptimizationPrompt = false
+                                pendingBatteryBucket?.let { viewModel.toggleAlbumBackup(it, true) }
+                                pendingBatteryBucket = null
+                            }
+                        ) { Text("去开启") }
+                    },
+                    dismissButton = {
+                        androidx.compose.material3.TextButton(
+                            onClick = {
+                                showBatteryOptimizationPrompt = false
+                                pendingBatteryBucket?.let { viewModel.toggleAlbumBackup(it, true) }
+                                pendingBatteryBucket = null
+                            }
+                        ) { Text("暂不需要") }
+                    }
                 )
             }
         }
@@ -371,7 +442,7 @@ private fun BackupStatusCard(
 
                 Column {
                     Text(
-                        text = if (isForceActive) "⚡ 强制立即上传中（持续1小时）" else if (activeCount > 0) "自动备份进行中" else "相册云端备份已同步",
+                        text = if (isForceActive) "⚡ 立即上传（持续1小时）" else if (activeCount > 0) "自动备份进行中" else "相册云端备份已同步",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onPrimaryContainer

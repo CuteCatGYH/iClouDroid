@@ -56,6 +56,7 @@
 | [ISS-042](#iss-042-视频拍摄信息在-apple-与-android-两端各自看不见) | 视频拍摄信息在 Apple 与 Android 两端各自看不见 | 🟠 P1 | Go / 元数据 | ✅ 已修复 |
 | [ISS-043](#iss-043-照片有-gps-但网页不显示地图) | 照片有 `{GPS}` 但网页不显示地图（缺 `CPLAsset.locationEnc`）| 🟠 P1 | Go / upload.go | ✅ 已修复 |
 | [ISS-044](#iss-044-motion-photo--live-photo-自动拆分与双资源-cloudkit-备份上传) | Motion Photo / Live Photo 自动拆分与双资源 CloudKit 备份上传全链路 | 🔴 P0 | Go / Android 全链路 | ✅ 已完成 |
+| [ISS-045](#iss-045-备份并发化时上传路径摘锁的死锁风险与权限弹窗盲区) | 备份并发化：上传路径摘锁后的死锁风险 + 权限弹窗顺序盲区 | 🟠 P1 | Android / 备份链路 | ✅ 已修复 |
 
 ---
 
@@ -4033,3 +4034,95 @@ if _, ok := verify["timestamp"].(time.Time); !ok {
 | 真机探针测试 `MotionPhotoUploadProbeTest` | ✅ 实测三星 SM-F9760 真机文件 `20261026_232117.heic`，组件精准拆分 |
 | Gradle 编译构建 | ✅ `:app:assembleDebug` 成功 |
 
+
+---
+
+## ISS-045：备份并发化时上传路径摘锁的死锁风险与权限弹窗盲区
+
+### 背景
+
+备份链路做了一次较大改造：上传从**串行**改为**并发**（`Semaphore`，并发度 1–3，默认 2），
+同时新增前台进度通知、`MediaStore` 实时监听、电池优化引导。
+
+改造本身方向正确，但几处改动互为前提，审阅时逐条核对后发现两个真问题，均已修复。
+
+### 问题一：摘锁与 `syncIncrementalLocked` 的配套关系
+
+`uploadPhotoFromQueue` 的签名从
+
+```kotlin
+= dataMutationMutex.withLock { withContext(Dispatchers.IO) { ... } }
+```
+
+改为
+
+```kotlin
+= withContext(Dispatchers.IO) { ... }
+```
+
+**这处摘锁是必需的**：`syncIncrementalLocked(100)` 移出后若不摘锁，3 个并发上传会全部堵在
+同一个 `Mutex()` 上，并发形同虚设。
+
+但 `syncIncrementalLocked` 是 `*Locked` 后缀命名，约定**调用方已持锁**。上传路径不再持锁，
+所以必须由调用点自己补上：
+
+```kotlin
+if (!duplicate) {
+    dataMutationMutex.withLock {
+        syncIncrementalLocked(100)
+    }
+}
+```
+
+> [!IMPORTANT]
+> `dataMutationMutex` 是 `Mutex()`，**非重入**。已确认 `syncIncrementalLocked` 自身不加锁，
+> 因此「调用方持锁」的约定成立，不会自死锁。若将来有人给它加上 `withLock`，这里会立即死锁。
+
+### 并发安全核查（均通过，无需改动）
+
+| 风险点 | 结论 |
+| --- | --- |
+| Go 侧 `*Session` 并发访问 | ✅ `Session.mu sync.RWMutex` 保护，`ExtractAndSaveCookies` 显式加锁 |
+| `ensureGoSession()` 并发重复重建 | ✅ `sessionMutex.withLock` 包裹整个重建流程，天然 single-flight |
+| `MediaStoreObserver` 实例累积 | ✅ 在 `IClouDroidApp.onCreate` 创建并注册，应用级单例 |
+| Observer 与 Worker 预扫描重复入队 | ✅ 两者都调 `scanAndEnqueueBucket`，内部按 `mediaStoreUri` 判重 |
+
+### 问题二：权限弹窗串联导致提示盲区
+
+勾选相册备份后的流程是「定位权限 → 电池优化」两级弹窗。原实现中，电池优化提示
+**只挂在定位权限授予的回调里**：
+
+```kotlin
+// 修复前
+if (granted) {
+    if (!hasPromptedBattery && !isIgnoringBatteryOptimizations(...)) {
+        showBatteryOptimizationPrompt = true
+    } else {
+        viewModel.toggleAlbumBackup(bucket, true)
+    }
+} else {
+    locationDeniedDialog = true          // ← 到此结束
+}
+```
+
+后果：用户只要拒绝定位（哪怕误点），就**永远拿不到「保持后台运行」的提示**——
+而后者对备份成功率的影响比定位大得多。
+
+修复：`if (!granted)` 分支只记录状态、**不再提前返回**，电池优化判断移出条件块，
+两条路径都能走到。
+
+### 验证
+
+| 项 | 结果 |
+| --- | --- |
+| `:app:compileDebugKotlin --rerun-tasks` | ✅ |
+| `:app:testDebugUnitTest` | ✅ 229 passed |
+| `go test ./...` | ✅ 全绿 |
+
+### 教训
+
+1. **摘掉一把锁之前，先确认哪些 `*Locked` 函数靠它活着。** 后缀命名本身就是契约。
+2. **串联的用户引导要检查「前一步失败」的路径。** 第 2 步的逻辑写在第 1 步的成功分支里，
+   是很容易犯的结构性错误。
+3. **审阅时不要只看 diff 片段下结论。** 本次审阅中曾误判 `isWiping` 属性位置错误，
+   实际是 diff 的上下文误导；`--rerun-tasks` 编译即证伪。**括号层级要实际数，不能凭印象。**

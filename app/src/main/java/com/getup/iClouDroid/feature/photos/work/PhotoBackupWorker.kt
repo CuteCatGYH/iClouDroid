@@ -1,20 +1,28 @@
 package com.getup.iClouDroid.feature.photos.work
 
 import android.content.Context
+import android.content.pm.ServiceInfo
+import android.os.Build
 import android.util.Log
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
+import androidx.work.ForegroundInfo
 import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.getup.iClouDroid.IClouDroidApp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
-import androidx.work.ExistingWorkPolicy
-import androidx.work.OneTimeWorkRequestBuilder
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Background worker for scanning local enabled albums, enqueuing, and streaming uploads to iCloud.
@@ -25,8 +33,11 @@ class PhotoBackupWorker(
 ) : CoroutineWorker(appContext, params) {
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
-        val container = (applicationContext as IClouDroidApp).container
+        val app = applicationContext as IClouDroidApp
+        val container = app.container
         val repo = container.photoRepository
+        val localRepo = container.localAlbumRepository
+        val appSettings = container.appSettings
         val db = container.photoDatabase
 
         if (repo.isWipeInProgress()) {
@@ -35,27 +46,117 @@ class PhotoBackupWorker(
         }
 
         try {
-            val pendingTasks = db.uploadQueueDao().getPendingTasks(status = "PENDING", limit = 20)
-            Log.d(TAG, "PhotoBackupWorker started. Pending tasks in queue: ${pendingTasks.size}")
+            // Reset any stale UPLOADING tasks from interrupted runs back to PENDING
+            db.uploadQueueDao().resetUploadingToPending()
 
-            for (task in pendingTasks) {
-                if (repo.isWipeInProgress()) {
-                    Log.d(TAG, "Aborting upload loop - logout teardown started")
-                    break
+            // 1. Pre-scan enabled backup buckets to enqueue any newly added local photos/videos
+            val enabledBucketIds = appSettings.enabledBackupBucketIds.value
+            if (enabledBucketIds.isNotEmpty()) {
+                var preScanNewlyEnqueued = 0
+                for (bucketId in enabledBucketIds) {
+                    if (repo.isWipeInProgress()) break
+                    preScanNewlyEnqueued += localRepo.scanAndEnqueueBucket(bucketId, db.uploadQueueDao())
                 }
+                Log.d(TAG, "Pre-scan enqueued $preScanNewlyEnqueued new items")
+            }
 
-                Log.d(TAG, "Processing upload for: ${task.filename} (id=${task.id})")
-                val uploadResult = repo.uploadPhotoFromQueue(task, applicationContext)
-                if (uploadResult.isSuccess) {
-                    Log.i(TAG, "Successfully uploaded ${task.filename}!")
-                } else {
-                    Log.w(TAG, "Failed to upload ${task.filename}: ${uploadResult.exceptionOrNull()?.message}")
+            val maxConcurrent = appSettings.maxConcurrentUploads.value.coerceIn(1, 3)
+            val showNotification = appSettings.showBackupNotification.value
+
+            val totalSuccessCount = AtomicInteger(0)
+            val completedCounter = AtomicInteger(0)
+
+            // Initial notification setup if enabled
+            val initialPendingCount = db.uploadQueueDao().getPendingCount()
+            if (showNotification && initialPendingCount > 0) {
+                val foregroundNotification = BackupNotificationHelper.buildOngoing(
+                    applicationContext,
+                    "准备上传...",
+                    0,
+                    initialPendingCount
+                )
+                try {
+                    val foregroundInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        ForegroundInfo(
+                            BackupNotificationHelper.NOTIFICATION_ID,
+                            foregroundNotification,
+                            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                        )
+                    } else {
+                        ForegroundInfo(BackupNotificationHelper.NOTIFICATION_ID, foregroundNotification)
+                    }
+                    setForeground(foregroundInfo)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to setForeground for PhotoBackupWorker: ${e.message}")
                 }
+            }
+
+            val semaphore = Semaphore(maxConcurrent)
+
+            // 2. Process queue in batches with configured maxConcurrent concurrency
+            while (!repo.isWipeInProgress()) {
+                val pendingTasks = db.uploadQueueDao().getPendingTasks(status = "PENDING", limit = maxConcurrent * 4)
+                if (pendingTasks.isEmpty()) break
+
+                val totalInQueue = db.uploadQueueDao().getPendingCount()
+
+                coroutineScope {
+                    for (task in pendingTasks) {
+                        if (repo.isWipeInProgress()) break
+
+                        launch {
+                            semaphore.withPermit {
+                                if (repo.isWipeInProgress()) return@withPermit
+
+                                // Mark task as UPLOADING precisely when acquiring permit to reflect accurate UI state
+                                db.uploadQueueDao().markTasksUploading(listOf(task.id))
+
+                                val currentCount = completedCounter.get()
+                                if (showNotification) {
+                                    BackupNotificationHelper.showOngoing(
+                                        applicationContext,
+                                        task.filename,
+                                        currentCount,
+                                        totalInQueue
+                                    )
+                                }
+
+                                Log.d(TAG, "Processing upload for: ${task.filename} (id=${task.id})")
+                                val uploadResult = repo.uploadPhotoFromQueue(task, applicationContext)
+
+                                if (uploadResult.isSuccess) {
+                                    totalSuccessCount.incrementAndGet()
+                                    Log.i(TAG, "Successfully uploaded ${task.filename}!")
+                                } else {
+                                    Log.w(TAG, "Failed to upload ${task.filename}: ${uploadResult.exceptionOrNull()?.message}")
+                                }
+
+                                val doneCount = completedCounter.incrementAndGet()
+                                if (showNotification) {
+                                    BackupNotificationHelper.showOngoing(
+                                        applicationContext,
+                                        task.filename,
+                                        doneCount,
+                                        totalInQueue
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            val uploadedCount = totalSuccessCount.get()
+            if (showNotification && uploadedCount > 0) {
+                BackupNotificationHelper.showFinished(applicationContext, uploadedCount)
+            } else {
+                BackupNotificationHelper.cancel(applicationContext)
             }
 
             Result.success()
         } catch (e: Exception) {
             Log.e(TAG, "PhotoBackupWorker encountered an error", e)
+            BackupNotificationHelper.cancel(applicationContext)
             if (runAttemptCount < MAX_ATTEMPTS) Result.retry() else Result.failure()
         }
     }
@@ -76,14 +177,14 @@ class PhotoBackupWorker(
 
             val networkType = if (allowCellular) NetworkType.CONNECTED else NetworkType.UNMETERED
 
-            val constraints = Constraints.Builder()
+            val immediateConstraints = Constraints.Builder()
                 .setRequiredNetworkType(networkType)
                 .setRequiresCharging(requireCharging)
                 .setRequiresBatteryNotLow(requireBatteryNotLow)
                 .build()
 
             val immediateRequest = OneTimeWorkRequestBuilder<PhotoBackupWorker>()
-                .setConstraints(constraints)
+                .setConstraints(immediateConstraints)
                 .build()
 
             WorkManager.getInstance(context).enqueueUniqueWork(
@@ -92,8 +193,9 @@ class PhotoBackupWorker(
                 immediateRequest
             )
 
-            val periodicRequest = PeriodicWorkRequestBuilder<PhotoBackupWorker>(1, TimeUnit.HOURS)
-                .setConstraints(constraints)
+            val intervalMinutes = appSettings?.periodicBackupInterval?.value?.coerceAtLeast(15L) ?: 60L
+            val periodicRequest = PeriodicWorkRequestBuilder<PhotoBackupWorker>(intervalMinutes, TimeUnit.MINUTES)
+                .setConstraints(immediateConstraints)
                 .build()
 
             WorkManager.getInstance(context).enqueueUniquePeriodicWork(
@@ -101,12 +203,13 @@ class PhotoBackupWorker(
                 ExistingPeriodicWorkPolicy.UPDATE,
                 periodicRequest
             )
-            Log.i(TAG, "Scheduled immediate & periodic PhotoBackupWorker (isForceUpload=$isForceUpload, cellular=$allowCellular, charging=$requireCharging, batteryNotLow=$requireBatteryNotLow)")
+            Log.i(TAG, "Scheduled immediate & periodic PhotoBackupWorker (interval=${intervalMinutes}m, isForceUpload=$isForceUpload, cellular=$allowCellular, charging=$requireCharging, batteryNotLow=$requireBatteryNotLow)")
         }
 
         fun cancelBackup(context: Context) {
             WorkManager.getInstance(context).cancelUniqueWork(IMMEDIATE_WORK_NAME)
             WorkManager.getInstance(context).cancelUniqueWork(UNIQUE_WORK_NAME)
+            BackupNotificationHelper.cancel(context)
             Log.i(TAG, "Cancelled PhotoBackupWorker")
         }
     }

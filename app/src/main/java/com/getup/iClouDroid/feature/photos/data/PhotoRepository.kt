@@ -1803,7 +1803,7 @@ class PhotoRepository(
     /**
      * Executes single photo upload using file descriptor (FD) via Go core.
      */
-    suspend fun uploadPhotoFromQueue(queueItem: com.getup.iClouDroid.feature.photos.data.db.UploadQueueEntity, context: Context): Result<LocalUploadResult> = dataMutationMutex.withLock {
+    suspend fun uploadPhotoFromQueue(queueItem: com.getup.iClouDroid.feature.photos.data.db.UploadQueueEntity, context: Context): Result<LocalUploadResult> =
         withContext(Dispatchers.IO) {
             wipeBlocked()?.let { return@withContext Result.failure(it.exceptionOrNull()!!) }
 
@@ -1865,7 +1865,18 @@ class PhotoRepository(
             }
 
             if (pfd == null) {
-                database.uploadQueueDao().update(queueItem.copy(status = "FAILED", lastError = "Unable to open FileDescriptor", updatedAt = System.currentTimeMillis()))
+                val nextRetry = queueItem.retryCount + 1
+                val nextStatus = if (nextRetry <= MAX_AUTO_RETRIES) "PENDING" else "FAILED"
+                val errorMsg = "Unable to open FileDescriptor" + if (nextStatus == "PENDING") " (自动重试 $nextRetry/$MAX_AUTO_RETRIES)" else ""
+
+                database.uploadQueueDao().update(
+                    queueItem.copy(
+                        status = nextStatus,
+                        retryCount = nextRetry,
+                        lastError = errorMsg,
+                        updatedAt = System.currentTimeMillis()
+                    )
+                )
                 return@withContext Result.failure(Exception("无法打开文件描述符"))
             }
 
@@ -2087,7 +2098,9 @@ class PhotoRepository(
 
                 if (!duplicate) {
                     // Post-upload idempotency guard: Trigger syncIncremental to pull asset back into local photo_assets
-                    syncIncrementalLocked(100)
+                    dataMutationMutex.withLock {
+                        syncIncrementalLocked(100)
+                    }
                 }
 
                 Result.success(
@@ -2101,18 +2114,25 @@ class PhotoRepository(
             } else {
                 val errCode = jsonResult.optString("errorCode", "UPLOAD_FAILED")
                 val errMsg = jsonResult.optString("errorMsg", "Upload failed")
+                val nextRetry = queueItem.retryCount + 1
+                val nextStatus = if (nextRetry <= MAX_AUTO_RETRIES) "PENDING" else "FAILED"
+                val errorMsg = "$errCode: $errMsg" + if (nextStatus == "PENDING") " (自动重试 $nextRetry/$MAX_AUTO_RETRIES)" else ""
+
                 database.uploadQueueDao().update(
                     queueItem.copy(
-                        status = "FAILED",
-                        retryCount = queueItem.retryCount + 1,
-                        lastError = "$errCode: $errMsg",
+                        status = nextStatus,
+                        retryCount = nextRetry,
+                        lastError = errorMsg,
                         updatedAt = System.currentTimeMillis()
                     )
+                )
+                Log.w(
+                    TAG,
+                    "Upload failed for ${queueItem.filename} ($errCode: $errMsg). Retry $nextRetry/$MAX_AUTO_RETRIES -> status=$nextStatus"
                 )
                 Result.failure(Exception("$errCode: $errMsg"))
             }
         }
-    }
 
     @Volatile
     var isWiping: Boolean = false
@@ -2230,6 +2250,8 @@ class PhotoRepository(
          * refreshes. Cached *negatives* ignore this value entirely — see `readMetadataFromDb`.
          */
         private const val METADATA_TTL_MS: Long = 24L * 60 * 60 * 1000
+
+        private const val MAX_AUTO_RETRIES = 3
 
         /**
          * Matches an explicit HTTP status token such as `HTTP 401`, `status:421`, `StatusCode=401`.

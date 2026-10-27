@@ -21,6 +21,9 @@ interface UploadQueueDao {
     @Query("SELECT * FROM upload_queue WHERE status = :status ORDER BY id ASC LIMIT :limit")
     suspend fun getPendingTasks(status: String = "PENDING", limit: Int = 10): List<UploadQueueEntity>
 
+    @Query("UPDATE upload_queue SET status = 'UPLOADING', updatedAt = :updatedAt WHERE id IN (:ids) AND status = 'PENDING'")
+    suspend fun markTasksUploading(ids: List<Long>, updatedAt: Long = System.currentTimeMillis()): Int
+
     @Query("SELECT * FROM upload_queue WHERE mediaStoreUri = :uri LIMIT 1")
     suspend fun findByUri(uri: String): UploadQueueEntity?
 
@@ -47,4 +50,7 @@ interface UploadQueueDao {
 
     @Query("UPDATE upload_queue SET status = 'PENDING', retryCount = 0 WHERE status = 'FAILED'")
     suspend fun retryFailedTasks()
+
+    @Query("UPDATE upload_queue SET status = 'PENDING' WHERE status = 'UPLOADING'")
+    suspend fun resetUploadingToPending()
 }

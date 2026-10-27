@@ -85,6 +85,9 @@ fun SettingsScreen(
     val allowCellularUpload by settings.allowCellularUpload.collectAsStateWithLifecycle()
     val requireCharging by settings.requireCharging.collectAsStateWithLifecycle()
     val requireBatteryNotLow by settings.requireBatteryNotLow.collectAsStateWithLifecycle()
+    val maxConcurrentUploads by settings.maxConcurrentUploads.collectAsStateWithLifecycle()
+    val showBackupNotification by settings.showBackupNotification.collectAsStateWithLifecycle()
+    val periodicBackupInterval by settings.periodicBackupInterval.collectAsStateWithLifecycle()
 
     var showScanWarning by remember { mutableStateOf(false) }
 
@@ -164,6 +167,9 @@ fun SettingsScreen(
                                 allowCellularUpload = allowCellularUpload,
                                 requireCharging = requireCharging,
                                 requireBatteryNotLow = requireBatteryNotLow,
+                                maxConcurrentUploads = maxConcurrentUploads,
+                                showBackupNotification = showBackupNotification,
+                                periodicBackupInterval = periodicBackupInterval,
                                 frequency = frequency,
                                 customDays = customDays,
                                 isFullScanRunning = isFullScanRunning,
@@ -263,6 +269,9 @@ private fun SettingsRow(
     allowCellularUpload: Boolean,
     requireCharging: Boolean,
     requireBatteryNotLow: Boolean,
+    maxConcurrentUploads: Int,
+    showBackupNotification: Boolean,
+    periodicBackupInterval: Long,
     frequency: ScanFrequency,
     customDays: Int,
     isFullScanRunning: Boolean,
@@ -273,6 +282,135 @@ private fun SettingsRow(
     val context = LocalContext.current
 
     when (item) {
+        SettingsItem.BATTERY_OPTIMIZATION -> {
+            val powerManager = remember { context.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager }
+            
+            // Re-evaluate whenever the screen is resumed
+            val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+            val lifecycleState by lifecycleOwner.lifecycle.currentStateFlow.collectAsStateWithLifecycle()
+            val isIgnoring = remember(lifecycleState) {
+                if (lifecycleState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) {
+                    powerManager.isIgnoringBatteryOptimizations(context.packageName)
+                } else {
+                    powerManager.isIgnoringBatteryOptimizations(context.packageName)
+                }
+            }
+            
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        if (!isIgnoring) {
+                            try {
+                                val intent = android.content.Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                                    data = android.net.Uri.parse("package:${context.packageName}")
+                                }
+                                context.startActivity(intent)
+                            } catch (e: Exception) {
+                                android.util.Log.e("SettingsScreen", "Failed to launch battery optimization intent", e)
+                                android.widget.Toast.makeText(context, "设备不支持直接跳转，请到系统设置中手动开启", android.widget.Toast.LENGTH_SHORT).show()
+                            }
+                        } else {
+                            // Already ignoring, maybe guide user to regular settings if they want to turn it off?
+                            try {
+                                val intent = android.content.Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                                context.startActivity(intent)
+                            } catch (e: Exception) {
+                                // ignore
+                            }
+                        }
+                    }
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "常驻后台 (实时备份)",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = if (isIgnoring) "已允许常驻后台，可提升实时备份概率" else "忽略电池优化，防止应用在后台被系统杀死",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    
+                    val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
+                    Text(
+                        text = "若设置未生效，请参考 Don't kill my app! ",
+                        style = MaterialTheme.typography.bodySmall.copy(textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline),
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.clickable {
+                            uriHandler.openUri("https://dontkillmyapp.com/")
+                        }
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Switch(
+                    checked = isIgnoring,
+                    onCheckedChange = null
+                )
+            }
+        }
+        
+        SettingsItem.PERIODIC_BACKUP_INTERVAL -> {
+            var showCustomIntervalDialog by remember { mutableStateOf(false) }
+
+            DropdownRow(
+                title = "周期备份频率",
+                subtitle = "后台触发自动扫描的最高频率",
+                current = if (periodicBackupInterval == 15L) "15 分钟 (最高效)" else if (periodicBackupInterval == 30L) "30 分钟" else if (periodicBackupInterval == 60L) "1 小时" else "$periodicBackupInterval 分钟",
+                options = listOf(
+                    15L to "15 分钟 (最高效)",
+                    30L to "30 分钟",
+                    60L to "1 小时",
+                    -1L to "自定义..."
+                ) + (if (listOf(15L, 30L, 60L, -1L).contains(periodicBackupInterval)) emptyList() else listOf(periodicBackupInterval to "$periodicBackupInterval 分钟 (自定义)")),
+                onSelect = {
+                    if (it == -1L) {
+                        showCustomIntervalDialog = true
+                    } else {
+                        settings.setPeriodicBackupInterval(it)
+                        // Need to re-schedule Worker after changing interval
+                        com.getup.iClouDroid.feature.photos.work.PhotoBackupWorker.scheduleBackup(context)
+                    }
+                }
+            )
+
+            if (showCustomIntervalDialog) {
+                var customInput by remember { mutableStateOf(periodicBackupInterval.toString()) }
+                AlertDialog(
+                    onDismissRequest = { showCustomIntervalDialog = false },
+                    title = { Text("自定义周期备份频率") },
+                    text = {
+                        Column {
+                            Text("输入间隔分钟数 (至少 15 分钟):", style = MaterialTheme.typography.bodyMedium)
+                            Spacer(Modifier.height(8.dp))
+                            androidx.compose.material3.OutlinedTextField(
+                                value = customInput,
+                                onValueChange = { customInput = it },
+                                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
+                                singleLine = true
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                val value = customInput.toLongOrNull() ?: 15L
+                                settings.setPeriodicBackupInterval(value)
+                                com.getup.iClouDroid.feature.photos.work.PhotoBackupWorker.scheduleBackup(context)
+                                showCustomIntervalDialog = false
+                            }
+                        ) { Text("确定") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showCustomIntervalDialog = false }) { Text("取消") }
+                    }
+                )
+            }
+        }
+
         SettingsItem.BACKUP_CELLULAR_DATA -> Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -345,6 +483,48 @@ private fun SettingsRow(
             Switch(
                 checked = requireBatteryNotLow,
                 onCheckedChange = { settings.setRequireBatteryNotLow(it) }
+            )
+        }
+
+        SettingsItem.BACKUP_CONCURRENT_LIMIT -> DropdownRow(
+            title = "多线程并发备份",
+            subtitle = "同时上传的照片或视频数量（最多 3 项）",
+            current = "$maxConcurrentUploads 项" + when (maxConcurrentUploads) {
+                1 -> " (串行)"
+                2 -> " (推荐)"
+                3 -> " (并行)"
+                else -> ""
+            },
+            options = listOf(
+                1 to "1 项 (串行上传)",
+                2 to "2 项 (均衡推荐)",
+                3 to "3 项 (高速并行)"
+            ),
+            onSelect = { settings.setMaxConcurrentUploads(it) }
+        )
+
+        SettingsItem.BACKUP_NOTIFICATION -> Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "显示备份通知栏进度",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = if (showBackupNotification) "后台备份时在通知栏实时展示上传进度" else "静默后台备份，不在通知栏显示进度",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Switch(
+                checked = showBackupNotification,
+                onCheckedChange = { settings.setShowBackupNotification(it) }
             )
         }
 

@@ -21,12 +21,19 @@ class IClouDroidApp : Application() {
     lateinit var container: AppContainer
         private set
 
+    lateinit var mediaStoreObserver: com.getup.iClouDroid.feature.photos.data.MediaStoreObserver
+        private set
+
     /** Outlives any screen; used only for fire-and-forget warm-up work. */
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onCreate() {
         super.onCreate()
         container = AppContainer(this)
+
+        // Register MediaStoreObserver for real-time photo backup detection
+        mediaStoreObserver = com.getup.iClouDroid.feature.photos.data.MediaStoreObserver(this)
+        mediaStoreObserver.register()
 
         // Warm the Coil disk cache off the main thread.
         //

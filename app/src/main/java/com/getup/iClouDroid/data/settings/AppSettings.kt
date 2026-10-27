@@ -221,6 +221,27 @@ class AppSettings(context: Context) {
         _requireBatteryNotLow.value = value
     }
 
+    private val _maxConcurrentUploads = MutableStateFlow(
+        prefs.getInt(KEY_MAX_CONCURRENT_UPLOADS, 2).coerceIn(1, 3)
+    )
+    val maxConcurrentUploads: StateFlow<Int> = _maxConcurrentUploads.asStateFlow()
+
+    fun setMaxConcurrentUploads(value: Int) {
+        val clamped = value.coerceIn(1, 3)
+        prefs.edit { putInt(KEY_MAX_CONCURRENT_UPLOADS, clamped) }
+        _maxConcurrentUploads.value = clamped
+    }
+
+    private val _showBackupNotification = MutableStateFlow(
+        prefs.getBoolean(KEY_SHOW_BACKUP_NOTIFICATION, true)
+    )
+    val showBackupNotification: StateFlow<Boolean> = _showBackupNotification.asStateFlow()
+
+    fun setShowBackupNotification(value: Boolean) {
+        prefs.edit { putBoolean(KEY_SHOW_BACKUP_NOTIFICATION, value) }
+        _showBackupNotification.value = value
+    }
+
     private val _forceUploadUntilTimestamp = MutableStateFlow(
         prefs.getLong(KEY_FORCE_UPLOAD_UNTIL, 0L)
     )
@@ -236,6 +257,17 @@ class AppSettings(context: Context) {
         return _forceUploadUntilTimestamp.value > System.currentTimeMillis()
     }
 
+    private val _periodicBackupInterval = MutableStateFlow(
+        prefs.getLong(KEY_PERIODIC_BACKUP_INTERVAL, 60L).coerceAtLeast(15L)
+    )
+    val periodicBackupInterval: StateFlow<Long> = _periodicBackupInterval.asStateFlow()
+
+    fun setPeriodicBackupInterval(minutes: Long) {
+        val clamped = minutes.coerceAtLeast(15L)
+        prefs.edit { putLong(KEY_PERIODIC_BACKUP_INTERVAL, clamped) }
+        _periodicBackupInterval.value = clamped
+    }
+
     companion object {
         private const val PREFS_NAME = "icloud_droid_settings"
         private const val KEY_THEME_MODE = "theme_mode"
@@ -249,7 +281,10 @@ class AppSettings(context: Context) {
         private const val KEY_ALLOW_CELLULAR_UPLOAD = "allow_cellular_upload"
         private const val KEY_REQUIRE_CHARGING = "require_charging"
         private const val KEY_REQUIRE_BATTERY_NOT_LOW = "require_battery_not_low"
+        private const val KEY_MAX_CONCURRENT_UPLOADS = "max_concurrent_uploads"
+        private const val KEY_SHOW_BACKUP_NOTIFICATION = "show_backup_notification"
         private const val KEY_FORCE_UPLOAD_UNTIL = "force_upload_until"
+        private const val KEY_PERIODIC_BACKUP_INTERVAL = "periodic_backup_interval"
 
         const val MIN_CUSTOM_DAYS = 1
         const val MAX_CUSTOM_DAYS = 365

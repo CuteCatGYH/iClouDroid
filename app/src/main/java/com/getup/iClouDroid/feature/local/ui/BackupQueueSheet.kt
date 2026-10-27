@@ -104,7 +104,7 @@ fun BackupQueueSheet(
                         ) {
                             Icon(Icons.Default.Bolt, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(4.dp))
-                            Text(if (isForceActive) "强制上传中" else "立即上传")
+                            Text(if (isForceActive) "上传中" else "立即上传")
                         }
                     }
                     if (failedCount > 0) {

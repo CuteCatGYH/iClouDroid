@@ -21,7 +21,7 @@ enum class AppDestination(
     val icon: ImageVector
 ) {
     Photos("照片", Icons.Default.Photo),
-    Albums("相册", Icons.Default.PhotoAlbum),
+    Albums("备份", Icons.Default.PhotoAlbum),
     Drive("云盘", Icons.Default.Folder),
     Notes("备忘录", Icons.AutoMirrored.Filled.Note),
     Reminders("提醒", Icons.Default.CheckCircle),
