@@ -1067,7 +1067,7 @@ totalDragX > 0  →  右滑  →  上一张
   **但该任务默认是「关闭」**，用户不主动开启时行为与之前一致。
 - [ ] **对账失败的可见性** —— `reconcileWithSeenIds()` 被安全闸门拒绝时只打一条 `Log.w`，
   用户在 UI 上看不到“这次扫描没有生效”。候选：在设置页展示最近一次对账结果。
-- [ ] `refreshUrlsForMasters()` 批量刷新入口已就绪但未被消费，可在列表预加载时预热
+- [x] **`refreshUrlsForMasters()` 批量刷新入口消费** —— 已在 `PhotosViewModel.observeMonth` 完成月份级批量预热，配合 `database.withTransaction` 解决滑动/跳转卡顿，见 [ISS-046](CHANGELOG_ISSUES.md#iss-046画廊缩略图加载主线程掉帧与滑动胶囊跳转重绘轰炸治理)
 - [ ] 列表项进入“本月无新照片”状态后可减少索引重建频率
 
 ### Phase 3 建议偿还的技术债

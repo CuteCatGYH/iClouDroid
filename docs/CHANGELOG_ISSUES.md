@@ -57,6 +57,7 @@
 | [ISS-043](#iss-043-照片有-gps-但网页不显示地图) | 照片有 `{GPS}` 但网页不显示地图（缺 `CPLAsset.locationEnc`）| 🟠 P1 | Go / upload.go | ✅ 已修复 |
 | [ISS-044](#iss-044-motion-photo--live-photo-自动拆分与双资源-cloudkit-备份上传) | Motion Photo / Live Photo 自动拆分与双资源 CloudKit 备份上传全链路 | 🔴 P0 | Go / Android 全链路 | ✅ 已完成 |
 | [ISS-045](#iss-045-备份并发化时上传路径摘锁的死锁风险与权限弹窗盲区) | 备份并发化：上传路径摘锁后的死锁风险 + 权限弹窗顺序盲区 | 🟠 P1 | Android / 备份链路 | ✅ 已修复 |
+| [ISS-046](#iss-046画廊缩略图加载主线程掉帧与滑动胶囊跳转重绘轰炸治理) | 画廊缩略图加载主线程掉帧与滑动/胶囊跳转重绘轰炸治理 | 🔴 P0 | Android / UI + Coil + Repository | ✅ 已修复 |
 
 ---
 
@@ -4126,3 +4127,53 @@ if (granted) {
    是很容易犯的结构性错误。
 3. **审阅时不要只看 diff 片段下结论。** 本次审阅中曾误判 `isWiping` 属性位置错误，
    实际是 diff 的上下文误导；`--rerun-tasks` 编译即证伪。**括号层级要实际数，不能凭印象。**
+
+---
+
+## ISS-046：画廊缩略图加载主线程掉帧与滑动/胶囊跳转重绘轰炸治理
+
+**优先级**：🔴 P0（卡顿影响基本体验）
+**归属**：Android / UI + Coil + Repository
+**发现时间**：Phase 3.2 首次真机高强度滑动与时间胶囊跳转测试
+
+### 现象
+
+1. **冷启动与快速滑动卡顿**：主线程大量丢帧（Logcat 频发 `Choreographer: Skipped 150 frames!`）。
+2. **时间胶囊跳转 / 上下滑动**：划入未缓存直链的新月份，屏幕卡死 1~2 秒，甚至出现缩略图停止加载（全屏灰块）。
+
+### 根因分析
+
+1. **`SessionManager` 磁盘加密偏好读取**：`ICloudPhotoInterceptor` 拦截器在加载每张缩略图时均调用 `sessionManager.getSessionGeneration()`，每次触发 `EncryptedSharedPreferences` 磁盘解密与锁竞争。
+2. **`SubcomposeAsyncImage` 测绘树风暴**：`PhotoGridItem` 使用 `SubcomposeAsyncImage`，触发子组合（Subcomposition）使网格单元格每帧执行双重测量。
+3. **`onGloballyPositioned` 实时生成 Rect 对象**：滑动时每帧对几十个可见项计算 `coords.boundsInWindow()`，产生海量 `Rect` 内存分配与坐标重算。
+4. **`String.format` 格式化耗时**：视频时长显示频繁调用 `String.format(Locale.getDefault(), ...)`，带来正则与 Locale 开销。
+5. **逐项网络请求与 Room 数据库更新（最严重死结）**：
+   - 当滑动或胶囊跳转划入包含 20~30 张新图的月份时，原本对每张图单独发起 JNI 直链刷新；
+   - 数据库层对 20~30 张图逐个执行独立的 `photoDao.updateUrls` 写入事务；
+   - Room 的 `InvalidationTracker` 触发 20~30 次 Flow 重新发射；
+   - 导致 `PhotosScreen` 被**强制重绘（Recompose）几十次**，主线程彻底被挤爆。
+6. **`monthDaysMap` 全局重新计算**：每当有 1 张照片直链更新，ViewModel 就会对**已订阅的所有月份**全量重新执行 `DayBucketing.groupPhotosByDay(...)`。
+
+### 修复方案
+
+1. **数据层批处理事务化 (`PhotoRepository.kt`)**：
+   - 在 `refreshUrlsForMasters` 批量更新 URL 循环外层引入 `database.withTransaction { ... }`，将 20~30 次 Room 写入压缩为 **1 次原子事务提交**，更新通知减少 96%。
+2. **月份级批量直链预热 (`PhotosViewModel.kt`)**：
+   - 在 `observeMonth` 监听月份加载时，自动收集直链缺失/过期的照片，一次性调用 `repository.refreshUrlsForMasters(staleMasterIds)` 发起 **1 次批量网络请求**（替代 20~30 次独立请求）。
+3. **`monthDaysMap` 增量计算 (`PhotosViewModel.kt`)**：
+   - 将 `monthDaysMap` 改为增量 `_monthDaysMap` (StateFlow) 维护，仅对发生数据变动的单个月份重新计算日分组，消除全局重算。
+4. **`SessionManager` 内存缓存 (`SessionManager.kt`)**：
+   - 为 `sessionGeneration` 添加 `@Volatile` 内存缓存，消除偏好文件读取锁开销。
+5. **UI 层优化 (`PhotoGridItem.kt` & `ViewerTransition.kt`)**：
+   - 使用 `AsyncImage` 替换 `SubcomposeAsyncImage`；
+   - 优化 `formatDuration` 为高效字符串拼接；
+   - `ThumbnailBoundsTracker` 使用 `HashMap<String, LayoutCoordinates>`，仅在用户点击大图查看时按需计算 `boundsInWindow()`。
+
+### 验证
+
+| 项 | 结果 |
+| --- | --- |
+| `:app:testDebugUnitTest` | ✅ 229 passed |
+| 真机胶囊跳转与滑动测试 | ✅ 20~30 张缩略图单批平滑呈现，无卡顿无空白 |
+| Logcat 丢帧监控 | ✅ `Choreographer: Skipped` 日志清零 |
+

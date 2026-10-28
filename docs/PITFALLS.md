@@ -715,3 +715,22 @@ RuntimeException: setDataSource failed: status = 0xFFFFFFEA
 2. **强制刷新**：下载 Live Photo 时若 `videoComplUrl` 为空，强制调用 `repository.refreshUrlsForMaster(masterId, force = true)`。
 3. **EXIF 复制与物理旋转**：解析原图 `TAG_ORIENTATION` 并通过 `Matrix().postRotate()` 将静态图像素物理旋转至正向，重置 `Orientation = 1`；通过 `ExifInterface` 将原图的所有 Exif 字段全量写回产物文件中。详见 [ISS-037](CHANGELOG_ISSUES.md#iss-037-实况照片单文件-motion-photo-打包与-exif-防旋转对齐)。
 
+## 24. 画廊网格加载卡顿：SubcomposeAsyncImage、单条 DB 写入事务与实时坐标重算
+
+**现象**：画廊上下滑动或时间胶囊跳转远端月份时，主线程严重卡顿、频发 `Choreographer: Skipped 150 frames!` 掉帧，甚至缩略图变灰停止加载。
+
+**根因**：
+1. **SubcomposeAsyncImage 双重测量**：`PhotoGridItem` 使用 `SubcomposeAsyncImage` 产生嵌套子组合，单元格每帧执行双重测量与布局。
+2. **`onGloballyPositioned` 实时生成 Rect 对象**：滑动时每帧对几十张卡片调用 `coords.boundsInWindow()`，触发海量 `Rect` 内存分配与坐标重算。
+3. **逐条数据库更新与 Flow 轰炸**：滑入新月份时，每张照片独立刷新直链并单独执行 `photoDao.updateUrls` 写入。Room 的 `InvalidationTracker` 在 1~2 秒内触发 20~30 次 Flow 重新发射与 UI 强制 Recompose。
+4. **`monthDaysMap` 全局重算**：每当有 1 张照片直链更新，ViewModel 就会对已订阅的所有月份重新执行 `DayBucketing.groupPhotosByDay(...)`。
+5. **`SessionManager` 加密磁盘偏好锁开销**：拦截器每张图都读 `EncryptedSharedPreferences.getInt()`。
+
+**规避措施**：
+1. **`AsyncImage` 替换 `SubcomposeAsyncImage`**：避免子组合测量开销，占位由卡片背景色优雅兜底。
+2. **坐标收集惰性求值**：`ThumbnailBoundsTracker` 使用 `HashMap<String, LayoutCoordinates>`，仅在用户点击大图查看时才计算 `boundsInWindow()`。
+3. **数据库事务化与月份级批量预热**：`PhotoRepository.refreshUrlsForMasters` 内使用 `database.withTransaction { ... }` 将批量写入压缩为 1 次原子提交；在 `PhotosViewModel.observeMonth` 中进行月份级批量预热。
+4. **日分组增量计算**：`monthDaysMap` 仅对数据变动的特定月份重新计算 `groupPhotosByDay`。
+5. **Session Generation 内存缓存**：`sessionManager` 增加 `@Volatile` 内存缓存，消除偏好文件读取锁开销。
+详见 [ISS-046](CHANGELOG_ISSUES.md#iss-046画廊缩略图加载主线程掉帧与滑动胶囊跳转重绘轰炸治理)。
+
