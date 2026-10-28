@@ -27,7 +27,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil.compose.SubcomposeAsyncImage
+import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.getup.iClouDroid.di.rememberAppContainer
 import com.getup.iClouDroid.feature.photos.data.image.ICloudImageLoaderFactory
@@ -41,64 +41,39 @@ fun PhotoGridItem(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     /**
-     * Reports this cell's bounds in the window, so the viewer can open from exactly where the
+     * Reports this cell's layout coordinates, so the viewer can open from exactly where the
      * thumbnail is and close back into it.
      */
-    onBoundsChanged: (androidx.compose.ui.geometry.Rect) -> Unit = {}
+    onBoundsChanged: (androidx.compose.ui.layout.LayoutCoordinates) -> Unit = {}
 ) {
     val context = LocalContext.current
     val container = rememberAppContainer()
     val imageLoader = ICloudImageLoaderFactory.get(context, container)
-    val model = ICloudImageModel.fromEntity(photo, ICloudImageModel.Quality.THUMB)
+    val model = androidx.compose.runtime.remember(photo) {
+        ICloudImageModel.fromEntity(photo, ICloudImageModel.Quality.THUMB)
+    }
+    val imageRequest = androidx.compose.runtime.remember(model, context) {
+        ImageRequest.Builder(context)
+            .data(model)
+            .crossfade(true)
+            .build()
+    }
 
     Box(
         modifier = modifier
             .aspectRatio(1f)
             .padding(1.dp)
             .onGloballyPositioned { coords ->
-                // `boundsInWindow` rather than `boundsInRoot`: the viewer is a sibling overlay in
-                // the same window, so window coordinates are the common frame that needs no
-                // conversion between the grid and the full-screen layer.
-                val rect = coords.boundsInWindow()
-                if (!rect.isEmpty) onBoundsChanged(rect)
+                onBoundsChanged(coords)
             }
             .background(MaterialTheme.colorScheme.surfaceVariant)
             .clickable(onClick = onClick)
     ) {
-        SubcomposeAsyncImage(
-            model = ImageRequest.Builder(context)
-                .data(model)
-                .crossfade(true)
-                .build(),
+        AsyncImage(
+            model = imageRequest,
             imageLoader = imageLoader,
             contentDescription = photo.filename,
             contentScale = ContentScale.Crop,
-            loading = {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-            },
-            error = {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.DarkGray),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "iCloud",
-                        color = Color.LightGray,
-                        fontSize = 10.sp
-                    )
-                }
-            },
             modifier = Modifier.fillMaxSize()
         )
 
@@ -167,5 +142,6 @@ private fun formatDuration(durationSeconds: Long): String {
     if (durationSeconds <= 0) return "0:00"
     val minutes = durationSeconds / 60
     val seconds = durationSeconds % 60
-    return String.format(Locale.getDefault(), "%d:%02d", minutes, seconds)
+    val secStr = if (seconds < 10) "0$seconds" else seconds.toString()
+    return "$minutes:$secStr"
 }

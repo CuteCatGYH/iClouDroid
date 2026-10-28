@@ -56,6 +56,7 @@ class SessionManager(context: Context) {
         val currentRegion = isChinaMainland()
         prefs.edit().clear().apply()
         setChinaMainland(currentRegion)
+        cachedSessionGeneration = null
     }
 
     fun getCookieString(): String? = prefs.getString(KEY_COOKIE_STR, null)
@@ -68,6 +69,9 @@ class SessionManager(context: Context) {
 
     fun isLoggedIn(): Boolean = prefs.getBoolean(KEY_IS_LOGGED_IN, false) && !getCookieString().isNullOrBlank()
 
+    @Volatile
+    private var cachedSessionGeneration: Int? = null
+
     /**
      * Monotonic counter of the Go core session generation.
      *
@@ -75,12 +79,19 @@ class SessionManager(context: Context) {
      * invalidates every previously issued `cvws.icloud-content.com` download URL. Rows stamped
      * with an older generation are therefore known-stale and must be refreshed before use.
      */
-    fun getSessionGeneration(): Int = prefs.getInt(KEY_SESSION_GENERATION, 0)
+    fun getSessionGeneration(): Int {
+        val cached = cachedSessionGeneration
+        if (cached != null) return cached
+        val gen = prefs.getInt(KEY_SESSION_GENERATION, 0)
+        cachedSessionGeneration = gen
+        return gen
+    }
 
     /** Increments and persists the session generation. Returns the new value. */
     fun bumpSessionGeneration(): Int {
         val next = getSessionGeneration() + 1
         prefs.edit().putInt(KEY_SESSION_GENERATION, next).apply()
+        cachedSessionGeneration = next
         return next
     }
 

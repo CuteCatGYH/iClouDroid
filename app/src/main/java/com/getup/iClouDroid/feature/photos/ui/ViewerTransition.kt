@@ -16,6 +16,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.layout.boundsInWindow
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
@@ -36,11 +37,11 @@ import kotlinx.coroutines.launch
  */
 @Stable
 class ThumbnailBoundsTracker {
-    private val bounds = mutableStateMapOf<String, Rect>()
+    private val bounds = HashMap<String, androidx.compose.ui.layout.LayoutCoordinates>()
 
     /** Called from each grid cell as it lays out. */
-    fun update(assetId: String, rect: Rect) {
-        if (bounds[assetId] != rect) bounds[assetId] = rect
+    fun update(assetId: String, coords: androidx.compose.ui.layout.LayoutCoordinates) {
+        bounds[assetId] = coords
     }
 
     /** Called when a cell leaves composition, so stale entries cannot accumulate. */
@@ -48,7 +49,12 @@ class ThumbnailBoundsTracker {
         bounds.remove(assetId)
     }
 
-    fun boundsOf(assetId: String): Rect? = bounds[assetId]
+    fun boundsOf(assetId: String): Rect? {
+        val coords = bounds[assetId] ?: return null
+        if (!coords.isAttached) return null
+        val rect = coords.boundsInWindow()
+        return if (rect.isEmpty) null else rect
+    }
 }
 
 @Composable

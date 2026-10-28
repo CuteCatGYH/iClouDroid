@@ -249,6 +249,7 @@ class ICloudPhotoInterceptor(
                 )
             }
         }
+        return@withPermit result.getOrNull()
     }
 
     private fun pickFreshUrl(data: ICloudImageModel, urls: RefreshedUrls?): String? {
@@ -289,11 +290,6 @@ class ICloudPhotoInterceptor(
 
         /**
          * Caps how many URL re-mints run at once.
-         *
-         * When the session generation bumps, every visible thumbnail is stale at the same time,
-         * so a cold start used to fire ~24 `/records/lookup` calls concurrently and re-mint them
-         * all on the main thread's tick, dropping ~40+ frames. The repository already coalesces
-         * duplicate lookups; this bounds the burst so the first screen stays responsive.
          */
         private val refreshGate = Semaphore(permits = 3)
     }

@@ -525,7 +525,7 @@ private fun MonthRow(
                     photo = photo,
                     onClick = { onPhotoClick(photo) },
                     modifier = Modifier.fillMaxWidth(),
-                    onBoundsChanged = { rect -> boundsTracker?.update(photo.id, rect) }
+                    onBoundsChanged = { coords -> boundsTracker?.update(photo.id, coords) }
                 )
             }
         }

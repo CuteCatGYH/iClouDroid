@@ -15,7 +15,9 @@ import com.getup.iClouDroid.feature.photos.data.db.SyncStateEntity
 import com.getup.iClouDroid.feature.photos.data.image.ICloudImageLoaderFactory
 import com.getup.iClouDroid.feature.photos.data.image.ICloudImageModel
 import com.getup.icloudcore.Icloudcore
+import androidx.room.withTransaction
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -24,6 +26,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -1354,22 +1357,24 @@ class PhotoRepository(
                 val generation = sessionManager.getSessionGeneration()
                 val out = mutableMapOf<String, RefreshedUrls>()
 
-                for (masterId in unique) {
-                    val masterUrls = urlsObj?.optJSONObject(masterId) ?: continue
-                    val thumb = masterUrls.optString("thumbUrl").ifBlank { null }
-                    val med = masterUrls.optString("medUrl").ifBlank { null }
-                    val orig = masterUrls.optString("originalUrl").ifBlank { null }
-                    val vid = masterUrls.optString("videoComplUrl").ifBlank { null }
+                database.withTransaction {
+                    for (masterId in unique) {
+                        val masterUrls = urlsObj?.optJSONObject(masterId) ?: continue
+                        val thumb = masterUrls.optString("thumbUrl").ifBlank { null }
+                        val med = masterUrls.optString("medUrl").ifBlank { null }
+                        val orig = masterUrls.optString("originalUrl").ifBlank { null }
+                        val vid = masterUrls.optString("videoComplUrl").ifBlank { null }
 
-                    // `/records/lookup` answers per master, but rows are keyed per asset: several
-                    // assets can share one master, so every row pointing at it receives the same
-                    // fresh signature (each with its own `urlFetchedAt`, which is what the Coil
-                    // interceptor's staleness check reads).
-                    val rows = photoDao.getPhotosByMasterId(masterId)
-                    for (row in rows) {
-                        photoDao.updateUrls(row.id, thumb, med, orig, vid, now, generation)
+                        // `/records/lookup` answers per master, but rows are keyed per asset: several
+                        // assets can share one master, so every row pointing at it receives the same
+                        // fresh signature (each with its own `urlFetchedAt`, which is what the Coil
+                        // interceptor's staleness check reads).
+                        val rows = photoDao.getPhotosByMasterId(masterId)
+                        for (row in rows) {
+                            photoDao.updateUrls(row.id, thumb, med, orig, vid, now, generation)
+                        }
+                        out[masterId] = RefreshedUrls(thumb, med, orig, vid)
                     }
-                    out[masterId] = RefreshedUrls(thumb, med, orig, vid)
                 }
 
                 refreshMutex.withLock {

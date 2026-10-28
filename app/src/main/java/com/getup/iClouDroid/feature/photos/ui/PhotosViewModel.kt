@@ -240,19 +240,14 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
     private val _monthPhotos = MutableStateFlow<Map<Int, List<PhotoAssetEntity>>>(emptyMap())
     val monthPhotos: StateFlow<Map<Int, List<PhotoAssetEntity>>> = _monthPhotos.asStateFlow()
 
+    private val _monthDaysMap = MutableStateFlow<Map<Int, List<com.getup.iClouDroid.feature.photos.data.DayBucketing.DayGroup>>>(emptyMap())
     /**
      * Day-level groupings per month, memoized for the Day View.
      */
-    val monthDaysMap: StateFlow<Map<Int, List<com.getup.iClouDroid.feature.photos.data.DayBucketing.DayGroup>>> =
-        _monthPhotos
-            .map { map ->
-                map.mapValues { (_, photos) ->
-                    com.getup.iClouDroid.feature.photos.data.DayBucketing.groupPhotosByDay(photos)
-                }
-            }
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+    val monthDaysMap: StateFlow<Map<Int, List<com.getup.iClouDroid.feature.photos.data.DayBucketing.DayGroup>>> = _monthDaysMap.asStateFlow()
 
     private val monthJobs = mutableMapOf<Int, Job>()
+    private val prewarmDedup = mutableMapOf<String, Long>()
 
     /**
      * Subscribes to every month in the library.
@@ -275,6 +270,9 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
             monthJobs[ym] = viewModelScope.launch {
                 repository.observeMonth(ym).collect { photos ->
                     _monthPhotos.update { it + (ym to photos) }
+                    val dayGroups = com.getup.iClouDroid.feature.photos.data.DayBucketing.groupPhotosByDay(photos)
+                    _monthDaysMap.update { it + (ym to dayGroups) }
+                    prewarmUrlsIfNeeded(photos)
                 }
             }
         }
@@ -285,6 +283,31 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
         for (ym in gone) {
             monthJobs.remove(ym)?.cancel()
             _monthPhotos.update { it - ym }
+            _monthDaysMap.update { it - ym }
+        }
+    }
+
+    private fun prewarmUrlsIfNeeded(photos: List<PhotoAssetEntity>) {
+        if (photos.isEmpty()) return
+        val now = System.currentTimeMillis()
+        val urlMaxAgeMs = 12 * 60 * 1000L
+        val dedupWindowMs = 5 * 60 * 1000L
+
+        val staleMasters = photos
+            .filter { photo ->
+                val lastAttempt = prewarmDedup[photo.masterId] ?: 0L
+                val isStale = photo.thumbUrl.isNullOrBlank() || (now - photo.urlFetchedAt > urlMaxAgeMs)
+                isStale && (now - lastAttempt > dedupWindowMs)
+            }
+            .map { it.masterId }
+            .distinct()
+            .filter { it.isNotBlank() }
+
+        if (staleMasters.isNotEmpty()) {
+            staleMasters.forEach { prewarmDedup[it] = now }
+            viewModelScope.launch(Dispatchers.IO) {
+                repository.refreshUrlsForMasters(staleMasters)
+            }
         }
     }
 
