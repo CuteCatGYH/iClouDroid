@@ -432,7 +432,10 @@ private fun SettingsRow(
             Spacer(Modifier.width(12.dp))
             Switch(
                 checked = allowCellularUpload,
-                onCheckedChange = { settings.setAllowCellularUpload(it) }
+                onCheckedChange = {
+                    settings.setAllowCellularUpload(it)
+                    com.getup.iClouDroid.feature.photos.work.PhotoBackupWorker.scheduleBackup(context)
+                }
             )
         }
 
@@ -457,7 +460,10 @@ private fun SettingsRow(
             Spacer(Modifier.width(12.dp))
             Switch(
                 checked = requireCharging,
-                onCheckedChange = { settings.setRequireCharging(it) }
+                onCheckedChange = {
+                    settings.setRequireCharging(it)
+                    com.getup.iClouDroid.feature.photos.work.PhotoBackupWorker.scheduleBackup(context)
+                }
             )
         }
 
@@ -482,7 +488,10 @@ private fun SettingsRow(
             Spacer(Modifier.width(12.dp))
             Switch(
                 checked = requireBatteryNotLow,
-                onCheckedChange = { settings.setRequireBatteryNotLow(it) }
+                onCheckedChange = {
+                    settings.setRequireBatteryNotLow(it)
+                    com.getup.iClouDroid.feature.photos.work.PhotoBackupWorker.scheduleBackup(context)
+                }
             )
         }
 

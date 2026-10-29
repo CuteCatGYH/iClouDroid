@@ -27,8 +27,29 @@ object MediaStoreDownloader {
     suspend fun downloadAsset(
         context: Context,
         photo: PhotoAssetEntity,
-        repository: PhotoRepository
+        repository: PhotoRepository,
+        onProgress: ((progressPercent: Int, downloadedBytes: Long) -> Unit)? = null
     ): Result<Uri> = withContext(Dispatchers.IO) {
+        val notificationId = photo.id.hashCode()
+        com.getup.iClouDroid.feature.photos.work.DownloadNotificationHelper.showProgress(
+            context,
+            notificationId,
+            photo.filename,
+            -1,
+            0L
+        )
+
+        val progressHandler: (Int, Long) -> Unit = { percent, bytes ->
+            onProgress?.invoke(percent, bytes)
+            com.getup.iClouDroid.feature.photos.work.DownloadNotificationHelper.showProgress(
+                context,
+                notificationId,
+                photo.filename,
+                percent,
+                bytes
+            )
+        }
+
         try {
             var downloadUrl = photo.originalUrl ?: photo.medUrl ?: photo.thumbUrl
             var videoComplUrl = photo.videoComplUrl
@@ -62,7 +83,14 @@ object MediaStoreDownloader {
             }
 
             if (downloadUrl.isNullOrBlank()) {
-                return@withContext Result.failure(Exception("无法获取有效的照片/视频下载链接"))
+                val err = Exception("无法获取有效的照片/视频下载链接")
+                com.getup.iClouDroid.feature.photos.work.DownloadNotificationHelper.showFailed(
+                    context,
+                    notificationId,
+                    photo.filename,
+                    err.message
+                )
+                return@withContext Result.failure(err)
             }
 
             val isVideo = photo.mediaType == "VIDEO" ||
@@ -70,11 +98,6 @@ object MediaStoreDownloader {
                 photo.filename.endsWith(".mov", ignoreCase = true)
 
             // If it is a Live Photo and we have videoComplUrl, save as a single Motion Photo file!
-            //
-            // `!isVideo` is load-bearing: packing appends a video into a JPEG-shaped container.
-            // Run on an actual movie it would produce a file that is neither a valid JPEG nor a
-            // playable video. `isLivePhoto` is inferred partly from `videoComplUrl` being present,
-            // so a movie that ever carried one would land here and be destroyed.
             if (!isVideo && isLivePhoto && !videoComplUrl.isNullOrBlank()) {
                 Log.i(TAG, "Downloading Live Photo as single Motion Photo for ${photo.filename}...")
                 val motionResult = downloadLivePhotoMotionPhoto(
@@ -82,9 +105,17 @@ object MediaStoreDownloader {
                     photoUrl = downloadUrl,
                     videoUrl = videoComplUrl,
                     photo = photo,
-                    repository = repository
+                    repository = repository,
+                    onProgress = progressHandler
                 )
                 if (motionResult.isSuccess) {
+                    val uri = motionResult.getOrThrow()
+                    com.getup.iClouDroid.feature.photos.work.DownloadNotificationHelper.showFinished(
+                        context,
+                        notificationId,
+                        photo.filename,
+                        uri
+                    )
                     return@withContext motionResult
                 } else {
                     Log.w(TAG, "Motion photo packing failed, falling back to static photo download", motionResult.exceptionOrNull())
@@ -104,7 +135,7 @@ object MediaStoreDownloader {
                 Environment.DIRECTORY_PICTURES + "/iClouDroid"
             }
 
-            downloadSingleFile(
+            val downloadResult = downloadSingleFile(
                 context = context,
                 url = downloadUrl,
                 filename = photo.filename,
@@ -113,10 +144,37 @@ object MediaStoreDownloader {
                 isVideo = isVideo,
                 assetDate = photo.assetDate,
                 masterId = photo.masterId,
-                repository = repository
+                repository = repository,
+                expectedSize = photo.size,
+                onProgress = progressHandler
             )
+
+            if (downloadResult.isSuccess) {
+                val uri = downloadResult.getOrThrow()
+                com.getup.iClouDroid.feature.photos.work.DownloadNotificationHelper.showFinished(
+                    context,
+                    notificationId,
+                    photo.filename,
+                    uri
+                )
+            } else {
+                com.getup.iClouDroid.feature.photos.work.DownloadNotificationHelper.showFailed(
+                    context,
+                    notificationId,
+                    photo.filename,
+                    downloadResult.exceptionOrNull()?.message
+                )
+            }
+
+            downloadResult
         } catch (e: Exception) {
             Log.e(TAG, "Failed to download asset", e)
+            com.getup.iClouDroid.feature.photos.work.DownloadNotificationHelper.showFailed(
+                context,
+                notificationId,
+                photo.filename,
+                e.message
+            )
             Result.failure(e)
         }
     }
@@ -126,12 +184,32 @@ object MediaStoreDownloader {
         photoUrl: String,
         videoUrl: String,
         photo: PhotoAssetEntity,
-        repository: PhotoRepository
+        repository: PhotoRepository,
+        onProgress: ((progressPercent: Int, downloadedBytes: Long) -> Unit)? = null
     ): Result<Uri> {
-        val photoBytes = fetchUrlBytes(photoUrl, photo.masterId, repository, isVideo = false)
-            ?: return Result.failure(Exception("无法获取静态原图数据"))
-        val videoBytes = fetchUrlBytes(videoUrl, photo.masterId, repository, isVideo = true)
-            ?: return Result.failure(Exception("无法获取实况视频数据"))
+        val photoBytes = fetchUrlBytes(
+            initialUrl = photoUrl,
+            masterId = photo.masterId,
+            repository = repository,
+            isVideo = false,
+            fallbackSize = if (photo.size > 0) photo.size / 4 else 0L,
+            onProgress = { p, bytes ->
+                val calcPercent = if (p >= 0) (p * 0.3).toInt().coerceIn(0, 30) else -1
+                onProgress?.invoke(calcPercent, bytes)
+            }
+        ) ?: return Result.failure(Exception("无法获取静态原图数据"))
+
+        val videoBytes = fetchUrlBytes(
+            initialUrl = videoUrl,
+            masterId = photo.masterId,
+            repository = repository,
+            isVideo = true,
+            fallbackSize = photo.size,
+            onProgress = { p, bytes ->
+                val calcPercent = if (p >= 0) (30 + p * 0.7).toInt().coerceIn(30, 100) else -1
+                onProgress?.invoke(calcPercent, photoBytes.size.toLong() + bytes)
+            }
+        ) ?: return Result.failure(Exception("无法获取实况视频数据"))
 
         // Issue 2 & 3 Fix: Read EXIF metadata & orientation from original photoBytes
         val srcExif = try {
@@ -281,7 +359,9 @@ object MediaStoreDownloader {
         initialUrl: String,
         masterId: String,
         repository: PhotoRepository,
-        isVideo: Boolean
+        isVideo: Boolean,
+        fallbackSize: Long = 0L,
+        onProgress: ((progressPercent: Int, downloadedBytes: Long) -> Unit)? = null
     ): ByteArray? {
         var currentUrl = initialUrl
         var connection = (URL(currentUrl).openConnection() as HttpURLConnection).apply {
@@ -296,11 +376,6 @@ object MediaStoreDownloader {
         ) {
             connection.disconnect()
             val refreshed = repository.refreshUrlsForMaster(masterId, force = true).getOrNull()
-            // `videoComplUrl` is the video **paired with a Live Photo**, not the movie itself.
-            // Preferring it for any video would, the day a clip arrives carrying one, hand the
-            // caller a completely different file (a few seconds of motion instead of the
-            // recording). It only ever resolved to null before because ordinary videos never
-            // have one - correct by accident, not by construction.
             val newUrl = if (isVideo) {
                 refreshed?.originalUrl ?: refreshed?.videoComplUrl
             } else {
@@ -322,8 +397,44 @@ object MediaStoreDownloader {
             return null
         }
 
+        val totalLength = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            connection.contentLengthLong.takeIf { it > 0 } ?: fallbackSize
+        } else {
+            connection.contentLength.toLong().takeIf { it > 0 } ?: fallbackSize
+        }
+
         return try {
-            connection.inputStream.use { it.readBytes() }
+            val out = ByteArrayOutputStream()
+            val buffer = ByteArray(64 * 1024)
+            var bytesRead: Int
+            var downloadedBytes = 0L
+            var lastReportTime = 0L
+            var lastReportedPercent = -1
+
+            connection.inputStream.use { inStream ->
+                while (inStream.read(buffer).also { bytesRead = it } != -1) {
+                    out.write(buffer, 0, bytesRead)
+                    downloadedBytes += bytesRead
+
+                    if (onProgress != null) {
+                        val percent = if (totalLength > 0) {
+                            ((downloadedBytes * 100) / totalLength).toInt().coerceIn(0, 100)
+                        } else {
+                            -1
+                        }
+                        val now = System.currentTimeMillis()
+                        if (percent != lastReportedPercent && (now - lastReportTime >= 250 || percent == 100 || (percent > 0 && percent - lastReportedPercent >= 2))) {
+                            lastReportedPercent = percent
+                            lastReportTime = now
+                            onProgress(percent, downloadedBytes)
+                        } else if (percent == -1 && now - lastReportTime >= 250) {
+                            lastReportTime = now
+                            onProgress(-1, downloadedBytes)
+                        }
+                    }
+                }
+            }
+            out.toByteArray()
         } finally {
             connection.disconnect()
         }
@@ -409,7 +520,9 @@ object MediaStoreDownloader {
         isVideo: Boolean,
         assetDate: Long,
         masterId: String,
-        repository: PhotoRepository
+        repository: PhotoRepository,
+        expectedSize: Long = 0L,
+        onProgress: ((progressPercent: Int, downloadedBytes: Long) -> Unit)? = null
     ): Result<Uri> {
         var currentUrl = url
         val collection = if (isVideo) {
@@ -456,8 +569,6 @@ object MediaStoreDownloader {
             Log.w(TAG, "URL returned ${connection.responseCode}, refreshing URL for master=$masterId...")
             connection.disconnect()
             val refreshed = repository.refreshUrlsForMaster(masterId, force = true).getOrNull()
-            // Same reasoning as in fetchUrlBytes: `originalUrl` first for videos. `videoComplUrl`
-            // is a Live Photo's paired clip, so putting it first would download the wrong bytes.
             val newUrl = if (isVideo) {
                 refreshed?.originalUrl ?: refreshed?.videoComplUrl
             } else {
@@ -486,10 +597,37 @@ object MediaStoreDownloader {
             outStream = resolver.openOutputStream(uri)
                 ?: throw Exception("无法打开 MediaStore 输出流 ($filename)")
 
+            val totalLength = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                connection.contentLengthLong.takeIf { it > 0 } ?: expectedSize
+            } else {
+                connection.contentLength.toLong().takeIf { it > 0 } ?: expectedSize
+            }
+            var downloadedBytes = 0L
+            var lastReportTime = 0L
+            var lastReportedPercent = -1
+
             val buffer = ByteArray(64 * 1024)
             var bytesRead: Int
             while (inStream.read(buffer).also { bytesRead = it } != -1) {
                 outStream.write(buffer, 0, bytesRead)
+                downloadedBytes += bytesRead
+
+                if (onProgress != null) {
+                    val percent = if (totalLength > 0) {
+                        ((downloadedBytes * 100) / totalLength).toInt().coerceIn(0, 100)
+                    } else {
+                        -1
+                    }
+                    val now = System.currentTimeMillis()
+                    if (percent != lastReportedPercent && (now - lastReportTime >= 250 || percent == 100 || (percent > 0 && percent - lastReportedPercent >= 2))) {
+                        lastReportedPercent = percent
+                        lastReportTime = now
+                        onProgress(percent, downloadedBytes)
+                    } else if (percent == -1 && now - lastReportTime >= 250) {
+                        lastReportTime = now
+                        onProgress(-1, downloadedBytes)
+                    }
+                }
             }
             outStream.flush()
         } catch (e: Exception) {

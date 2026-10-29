@@ -87,6 +87,7 @@ fun PhotosScreen(
     val syncMessage by viewModel.syncMessage.collectAsStateWithLifecycle()
     val viewer by viewModel.viewer.collectAsStateWithLifecycle()
     val downloadState by viewModel.downloadState.collectAsStateWithLifecycle()
+    val isSharing by viewModel.isSharing.collectAsStateWithLifecycle()
     val monthPhotos by viewModel.monthPhotos.collectAsStateWithLifecycle()
     val monthDaysMap by viewModel.monthDaysMap.collectAsStateWithLifecycle()
     val viewMode by viewModel.galleryViewMode.collectAsStateWithLifecycle()
@@ -394,6 +395,8 @@ fun PhotosScreen(
                 downloadState = downloadState,
                 onDismiss = viewModel::closeViewer,
                 onDownload = { photo -> viewModel.downloadPhoto(context, photo) },
+                onShare = { photo -> viewModel.sharePhoto(context, photo) },
+                isSharing = isSharing,
                 onIndexChange = viewModel::setViewerIndex,
                 anchorBounds = currentPhotoId?.let { thumbnailBounds.boundsOf(it) },
                 boundsTracker = thumbnailBounds,

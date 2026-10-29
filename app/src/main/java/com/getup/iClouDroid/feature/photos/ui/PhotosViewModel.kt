@@ -2,6 +2,7 @@ package com.getup.iClouDroid.feature.photos.ui
 
 import android.app.Application
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.util.Log
 import android.widget.Toast
@@ -154,6 +155,9 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
 
     private val _downloadState = MutableStateFlow<DownloadState>(DownloadState.Idle)
     val downloadState: StateFlow<DownloadState> = _downloadState.asStateFlow()
+
+    private val _isSharing = MutableStateFlow(false)
+    val isSharing: StateFlow<Boolean> = _isSharing.asStateFlow()
 
     private var hasAutoStarted = false
     private var scanJob: Job? = null
@@ -554,6 +558,58 @@ class PhotosViewModel(application: Application) : AndroidViewModel(application) 
                     Toast.makeText(context, "下载失败: $err", Toast.LENGTH_LONG).show()
                 }
             }
+        }
+    }
+
+    fun sharePhoto(context: Context, photo: PhotoAssetEntity) {
+        if (_isSharing.value) return
+        _isSharing.value = true
+
+        viewModelScope.launch {
+            try {
+                val result = MediaStoreDownloader.downloadAsset(context, photo, repository)
+                if (result.isSuccess) {
+                    val uri = result.getOrThrow()
+                    withContext(Dispatchers.Main) {
+                        launchShareIntent(context, uri, photo)
+                    }
+                } else {
+                    val err = result.exceptionOrNull()?.message ?: "下载文件失败"
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "准备分享失败: $err", Toast.LENGTH_LONG).show()
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "分享出错: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            } finally {
+                _isSharing.value = false
+            }
+        }
+    }
+
+    private fun launchShareIntent(context: Context, uri: Uri, photo: PhotoAssetEntity) {
+        val mimeType = context.contentResolver.getType(uri) ?: when {
+            photo.filename.endsWith(".mov", ignoreCase = true) -> "video/quicktime"
+            photo.filename.endsWith(".mp4", ignoreCase = true) -> "video/mp4"
+            photo.filename.endsWith(".heic", ignoreCase = true) -> "image/heic"
+            photo.filename.endsWith(".png", ignoreCase = true) -> "image/png"
+            else -> "image/*"
+        }
+
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = mimeType
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+
+        val chooser = Intent.createChooser(shareIntent, "分享照片或视频")
+        chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            context.startActivity(chooser)
+        } catch (e: Exception) {
+            Toast.makeText(context, "无法启动分享: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
 

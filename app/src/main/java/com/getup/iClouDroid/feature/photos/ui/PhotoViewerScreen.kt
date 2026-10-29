@@ -32,6 +32,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -111,6 +112,8 @@ fun PhotoViewerScreen(
     downloadState: DownloadState,
     onDismiss: () -> Unit,
     onDownload: (PhotoAssetEntity) -> Unit,
+    onShare: (PhotoAssetEntity) -> Unit = {},
+    isSharing: Boolean = false,
     onIndexChange: (Int) -> Unit,
     modifier: Modifier = Modifier,
     /**
@@ -645,6 +648,26 @@ fun PhotoViewerScreen(
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                ViewerAction(
+                    label = if (isSharing) "准备中" else "分享",
+                    icon = {
+                        if (isSharing) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp,
+                                color = Color.White
+                            )
+                        } else {
+                            Icon(
+                                Icons.Default.Share,
+                                contentDescription = "分享",
+                                tint = Color.White
+                            )
+                        }
+                    },
+                    enabled = !isSharing,
+                    onClick = { onShare(current) }
+                )
                 ViewerAction(
                     label = "信息",
                     icon = { Icon(Icons.Default.Info, contentDescription = null, tint = Color.White) },
