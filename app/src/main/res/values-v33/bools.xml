@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Enable CloudMediaProvider on Android 13+ (API 33+) -->
+    <bool name="is_cloud_media_provider_enabled">true</bool>
+</resources>

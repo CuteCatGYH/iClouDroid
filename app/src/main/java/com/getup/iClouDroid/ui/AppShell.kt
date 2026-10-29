@@ -1,13 +1,19 @@
 package com.getup.iClouDroid.ui
 
-import android.content.Context
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationRail
+import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.Text
+import androidx.compose.material3.windowsizeclass.WindowSizeClass
+import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -45,22 +51,14 @@ fun AppShell(
     localAlbumsViewModel: com.getup.iClouDroid.feature.local.ui.LocalAlbumsViewModel,
     onOpenAccountInfo: () -> Unit,
     modifier: Modifier = Modifier,
+    windowSizeClass: WindowSizeClass? = null,
     openSettings: Boolean = false,
     onOpenSettingsHandled: () -> Unit = {}
 ) {
     var selected by rememberSaveable { mutableStateOf(AppDestination.Photos) }
 
-    // True while the photo viewer is full-screen. The bottom navigation is removed then:
-    // the viewer is only "full screen" if nothing else is drawing below it.
-    //
-    // NOTE: this is deliberately NOT hoisted into a shared `Scaffold`'s bottomBar. It used to be,
-    // and it broke in a way that was hard to see: toggling the `bottomBar` composable changes the
-    // child's `Scaffold` slot, and Compose's movable-content handling resets the state of anything
-    // that sits in a changed slot. The `viewerOpen` flag went stale as a result and the navigation
-    // bar stayed on screen — squarely on top of the viewer's 信息 / 下载 row.
-    //
-    // Rendering the navigation bar as an ordinary sibling that is simply not composed avoids that
-    // entirely, and has the side benefit that the viewer never shifts when the bar comes back.
+    // True while the photo viewer is full-screen. The bottom/side navigation is removed then:
+    // the viewer is only "full screen" if nothing else is drawing below or beside it.
     var viewerOpen by rememberSaveable { mutableStateOf(false) }
 
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
@@ -93,33 +91,81 @@ fun AppShell(
         }
     }
 
-    Box(modifier = modifier.fillMaxSize()) {
-        // Height the navigation bar occupies. Reserved manually so content is never laid out
-        // underneath it, and so that laying the bar over `Drive` / `备忘录` needs no extra padding.
-        // `NavigationBar` is M3's 80dp; keeping the number here (rather than measuring) means the
-        // padding does not change when the bar is removed, so the grid never shifts on open/close.
-        val navBarHeight = 80.dp
-        val navBarPadding = if (viewerOpen || settingsOpen) 0.dp else navBarHeight
+    val isCompact = windowSizeClass == null || windowSizeClass.widthSizeClass == WindowWidthSizeClass.Compact
 
-        Box(modifier = Modifier.fillMaxSize()) {
-            when (selected) {
-                AppDestination.Photos -> PhotosScreen(
-                    viewModel = photosViewModel,
+    val activeDestinations = remember(navBarDestinations) {
+        AppDestination.entries.filter { it in navBarDestinations }
+    }
+
+    Box(modifier = modifier.fillMaxSize()) {
+        if (isCompact) {
+            // Compact Mode (e.g. phones in portrait): Bottom NavigationBar
+            val navBarHeight = 80.dp
+            val navBarPadding = if (viewerOpen || settingsOpen) 0.dp else navBarHeight
+
+            Box(modifier = Modifier.fillMaxSize()) {
+                MainContentArea(
+                    selected = selected,
+                    photosViewModel = photosViewModel,
+                    localAlbumsViewModel = localAlbumsViewModel,
                     onOpenAccountInfo = onOpenAccountInfo,
-                    isViewerOpen = viewerOpen,
+                    viewerOpen = viewerOpen,
                     onViewerOpenChange = { viewerOpen = it },
                     contentPadding = PaddingValues(bottom = navBarPadding)
                 )
-                AppDestination.Albums -> {
-                    com.getup.iClouDroid.feature.local.ui.LocalAlbumsScreen(
-                        viewModel = localAlbumsViewModel,
-                        contentPadding = PaddingValues(bottom = navBarPadding)
+
+                if (!viewerOpen && !settingsOpen) {
+                    NavigationBar(modifier = Modifier.align(Alignment.BottomCenter)) {
+                        activeDestinations.forEach { destination ->
+                            NavigationBarItem(
+                                selected = selected == destination,
+                                onClick = { selected = destination },
+                                icon = {
+                                    Icon(
+                                        imageVector = destination.icon,
+                                        contentDescription = destination.label
+                                    )
+                                },
+                                label = { Text(destination.label) }
+                            )
+                        }
+                    }
+                }
+            }
+        } else {
+            // Medium / Expanded Mode (e.g. foldables unfolded, tablets, landscape): Side NavigationRail
+            Row(modifier = Modifier.fillMaxSize()) {
+                if (!viewerOpen && !settingsOpen) {
+                    NavigationRail(modifier = Modifier.fillMaxHeight()) {
+                        Spacer(modifier = Modifier.weight(1f))
+                        activeDestinations.forEach { destination ->
+                            NavigationRailItem(
+                                selected = selected == destination,
+                                onClick = { selected = destination },
+                                icon = {
+                                    Icon(
+                                        imageVector = destination.icon,
+                                        contentDescription = destination.label
+                                    )
+                                },
+                                label = { Text(destination.label) }
+                            )
+                        }
+                        Spacer(modifier = Modifier.weight(1f))
+                    }
+                }
+
+                Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                    MainContentArea(
+                        selected = selected,
+                        photosViewModel = photosViewModel,
+                        localAlbumsViewModel = localAlbumsViewModel,
+                        onOpenAccountInfo = onOpenAccountInfo,
+                        viewerOpen = viewerOpen,
+                        onViewerOpenChange = { viewerOpen = it },
+                        contentPadding = PaddingValues()
                     )
                 }
-                AppDestination.Drive -> FeatureWebViewScreen(url = "https://www.icloud.com.cn/iclouddrive/")
-                AppDestination.Notes -> FeatureWebViewScreen(url = "https://www.icloud.com.cn/notes/")
-                AppDestination.Reminders -> FeatureWebViewScreen(url = "https://www.icloud.com.cn/reminders/")
-                AppDestination.FindMy -> FeatureWebViewScreen(url = "https://www.icloud.com.cn/find/")
             }
         }
 
@@ -136,31 +182,11 @@ fun AppShell(
                 },
                 onCustomIntervalChanged = { days ->
                     settings.setCustomIntervalDays(days)
-                    // Only re-schedule when the custom value is actually in use; otherwise this
-                    // would silently replace an active daily/weekly schedule with a custom one.
                     if (frequency == com.getup.iClouDroid.data.settings.ScanFrequency.CUSTOM) {
                         PeriodicScanScheduler.apply(context, settings)
                     }
                 }
             )
-        }
-
-        if (!viewerOpen && !settingsOpen) {
-            NavigationBar(modifier = Modifier.align(Alignment.BottomCenter)) {
-                AppDestination.entries.filter { it in navBarDestinations }.forEach { destination ->
-                    NavigationBarItem(
-                        selected = selected == destination,
-                        onClick = { selected = destination },
-                        icon = {
-                            Icon(
-                                imageVector = destination.icon,
-                                contentDescription = destination.label
-                            )
-                        },
-                        label = { Text(destination.label) }
-                    )
-                }
-            }
         }
     }
 
@@ -172,5 +198,36 @@ fun AppShell(
      */
     androidx.compose.runtime.LaunchedEffect(Unit) {
         PeriodicScanScheduler.apply(context, settings)
+    }
+}
+
+@Composable
+private fun MainContentArea(
+    selected: AppDestination,
+    photosViewModel: PhotosViewModel,
+    localAlbumsViewModel: com.getup.iClouDroid.feature.local.ui.LocalAlbumsViewModel,
+    onOpenAccountInfo: () -> Unit,
+    viewerOpen: Boolean,
+    onViewerOpenChange: (Boolean) -> Unit,
+    contentPadding: PaddingValues
+) {
+    when (selected) {
+        AppDestination.Photos -> PhotosScreen(
+            viewModel = photosViewModel,
+            onOpenAccountInfo = onOpenAccountInfo,
+            isViewerOpen = viewerOpen,
+            onViewerOpenChange = onViewerOpenChange,
+            contentPadding = contentPadding
+        )
+        AppDestination.Albums -> {
+            com.getup.iClouDroid.feature.local.ui.LocalAlbumsScreen(
+                viewModel = localAlbumsViewModel,
+                contentPadding = contentPadding
+            )
+        }
+        AppDestination.Drive -> FeatureWebViewScreen(url = "https://www.icloud.com.cn/iclouddrive/")
+        AppDestination.Notes -> FeatureWebViewScreen(url = "https://www.icloud.com.cn/notes/")
+        AppDestination.Reminders -> FeatureWebViewScreen(url = "https://www.icloud.com.cn/reminders/")
+        AppDestination.FindMy -> FeatureWebViewScreen(url = "https://www.icloud.com.cn/find/")
     }
 }

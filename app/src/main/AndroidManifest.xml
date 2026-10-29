@@ -49,6 +49,7 @@
         <provider
             android:name=".provider.ICloudMediaProvider"
             android:authorities="com.getup.iClouDroid.cloudmedia"
+            android:enabled="@bool/is_cloud_media_provider_enabled"
             android:exported="true"
             android:permission="com.android.providers.media.permission.MANAGE_CLOUD_MEDIA_PROVIDERS">
             <intent-filter>

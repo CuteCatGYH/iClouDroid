@@ -317,7 +317,7 @@
 
 ### Phase 4: 跨生态深度适配 (安卓 + 苹果痛点打磨)
 
-- [ ] **Motion Photo ↔ Live Photo 互转**
+- [x] **Motion Photo ↔ Live Photo 互转**
   - [x] **上传（安卓 → iCloud）**：检测 Motion Photo XMP 标签（GCamera 与 Container v2 多行格式），自动拆分静图与伴侣 MP4 视频，向 CloudKit 组装双资源 `CPLMaster` 与 `CPLAsset` 上传（详见 [ISS-044](CHANGELOG_ISSUES.md#iss-044-motion-photo--live-photo-自动拆分与双资源-cloudkit-备份上传)）
   - [x] **下载（iCloud → 安卓）**：`CPLMaster` 含 `resOriginalVidComplRes` 时同时下载图+视频，按 Google/三星 Motion Photo 规范插入 APP1 XMP (`GCamera:MotionPhoto="1"`) 拼接单文件，全量复制 EXIF 并将 Bitmap 物理旋转至正向（详见 [ISS-037](CHANGELOG_ISSUES.md#iss-037-实况照片单文件-motion-photo-打包与-exif-防旋转对齐)）
 - [ ] **折叠屏与大屏自适应布局**

@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi
+import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -88,11 +90,15 @@ class MainActivity : ComponentActivity() {
                         }
 
                         is AuthUiState.LoggedIn -> {
+                            @OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
+                            val windowSizeClass = calculateWindowSizeClass(this)
+
                             // Authentication is an app-level concern; once it succeeds we hand off
                             // to the shell, which owns section switching (photos / drive / notes).
                             AppShell(
                                 photosViewModel = photosViewModel,
                                 localAlbumsViewModel = localAlbumsViewModel,
+                                windowSizeClass = windowSizeClass,
                                 openSettings = openSettings,
                                 onOpenSettingsHandled = { openSettings = false },
                                 onOpenAccountInfo = { showAccountDialog = true }
