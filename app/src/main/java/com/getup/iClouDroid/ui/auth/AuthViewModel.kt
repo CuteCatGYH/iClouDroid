@@ -33,7 +33,10 @@ sealed interface AuthUiState {
      * ~1.5s of blocked main thread on a real device.
      */
     data object Checking : AuthUiState
-    data class NotLoggedIn(val isChinaMainland: Boolean = true) : AuthUiState
+    data class NotLoggedIn(
+        val isChinaMainland: Boolean = true,
+        val showSessionExpiredAlert: Boolean = false
+    ) : AuthUiState
     data class Authenticating(val message: String) : AuthUiState
     data class LoggedIn(
         val dsid: String,
@@ -158,14 +161,20 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
         val validation: CookieValidationResult?
     )
 
-    fun setRegion(isChinaMainland: Boolean) {
+    fun setRegion(isChinaMainland: Boolean, showExpiredAlert: Boolean = false) {
         sessionManager.setChinaMainland(isChinaMainland)
         _cookieDiagnostic.value = null
         val currentState = _uiState.value
         if (currentState is AuthUiState.NotLoggedIn) {
-            _uiState.value = AuthUiState.NotLoggedIn(isChinaMainland)
+            _uiState.value = AuthUiState.NotLoggedIn(
+                isChinaMainland = isChinaMainland,
+                showSessionExpiredAlert = showExpiredAlert || currentState.showSessionExpiredAlert
+            )
         } else if (currentState is AuthUiState.Error) {
-            _uiState.value = AuthUiState.NotLoggedIn(isChinaMainland)
+            _uiState.value = AuthUiState.NotLoggedIn(
+                isChinaMainland = isChinaMainland,
+                showSessionExpiredAlert = true
+            )
         }
     }
 

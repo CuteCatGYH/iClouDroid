@@ -1,192 +1,163 @@
 # iClouDroid
 
-> **在 Android 手机上直接看你的 iCloud 照片。** 不需要 iPhone，不需要 iPad，也不需要开电脑。
+> **在 Android 手机上直接浏览与同步你的 iCloud 。** 不需要 iPhone，不需要 iPad，也不需要开电脑。
 
-如果你手上是 Android 主力机，但照片都存在 iCloud 里（家里有 iPhone、iPad 或 Mac 在拍），
-这个 App 让你在 Android 上直接浏览那批照片 —— 就像用系统相册一样。
-
----
-
-## 它能做什么
-
-**📷 浏览整个 iCloud 照片库**
-
-登录你的 Apple ID，就能在 Android 上看到 iCloud 里的全部照片和视频。
-按月份分组，滚动流畅，可以切换每行显示 3 / 4 / 5 张。
-
-**⚡ 边扫边看，不用等**
-
-第一次登录后会整理整个图库。你不需要盯着进度条等它跑完 —— 最快的那部分照片会先出现，
-你可以马上开始查看，剩下的可在后台继续整理。
-
-**🔒 登录信息加密保存在手机上**
-
-用 Apple 官方的登录页面输入密码和验证码（和你在浏览器里登录 iCloud 一模一样），
-App 不会看到也不会保存你的密码。登录状态加密存放在手机本地。
-
-**🌏 国内和海外账号都支持**
-
-登录前请选择中国区（云上贵州）或国际区的 iCloud，登录成功后请点击***提取 cookie***按钮。
-
-**🖼️ 原图、视频、下载都在**
-
-点开可以看大图；支持视频播放；可以把照片保存到手机相册。
+如果你手上是 Android 主力机，但照片都存在 iCloud 里（或家里有 iPhone、iPad、Mac 在拍），
+**iClouDroid** 让你在 Android 上流畅浏览 iCloud 照片与视频、将本地相册自动备份到 iCloud，甚至让其他 Android App 也能直接选择 iCloud 里的照片。
 
 ---
 
-## 怎么用
+## ✨ 它能做什么
 
-1. **安装 App**，打开后选择你的账号区域（中国大陆 / 国际）
-2. **点击下方按钮**会打开 iCloud 官方登录页，正常输入 Apple ID 和密码
-3. **收到验证码时输入**；如果看到「信任此浏览器」的选项，**建议勾选** —— 这样之后一段时间不用重复登录
-4. 登录成功后会自动开始整理照片库，稍等片刻就能看到照片
+**📷 浏览你的 iCloud**
+登录你的 Apple ID，即可在 Android 上查看你 iCloud 中的全部数据。可以查看照片库、云盘、备忘录等等
 
-> **关于「信任此浏览器」**
-> 勾选后，iCloud 会记住这台设备 30~60 天。这段时间里你重新打开 App 不需要再登录。
-> 不勾选也能用，只是登录状态会更频繁地过期。
+**🔄 本地相册自动备份至 iCloud（含实况照片）**
+支持将本地相册（照片、视频、Google Motion Photo）自动后台备份上传至 iCloud。
+自动识别 Motion Photo（安卓动态照片） ，并以 Apple 原生 **Live Photo** 格式无损写入 iCloud Photo；具备本地指纹与云端双重查重，避免重复上传。
 
----
+**📸 实况照片 (Live Photo) 双向无缝互转** *（不保证对所有机型有效）*
+- **下载**：iCloud 里的 Live Photo 保存到手机时自动打包为标准的 Google Motion Photo
+- **上传**：本地 Motion Photo 上传时自动解析并转换为 Apple Live Photo。
 
-## 常见问题
+**📱 集成进系统 PhotoPicker（云端媒体提供方）**
+支持 Android 13+ 的 `CloudMediaProvider` 标准。在浏览器、X、小红书等第三方 App 选图时，可以直接选择 iCloud 里的照片与视频
 
-**Q：我的密码会被上传到哪里吗？**
+**🖼️ 全屏预览、读取 EXIF 元数据**
+全屏预览支持照片、视频以及 Live Photo。info 面板支持解析与展示 ISO、光圈、快门、焦距、相机/镜头型号以及 EXIF GPS 地图定位。
 
-不会。登录完全通过 Apple 官方的网页完成，和你在浏览器里登录 iCloud 是同一个页面。
-App 只保存登录成功后 iCloud 发给它的"凭证"，且加密存放在手机本地。
-
-**Q：为什么第一次打开要等一会儿？**
-
-iCloud 上万个文件需要逐个读取。App 会按时间从新到旧整理，
-所以你看到的照片从最近开始 —— 马上就能用，不用等全部完成。
-
-**Q：可以关掉 App 吗？会不会中断？**
-
-可以。切到后台后会在通知栏显示进度并继续工作。
-如果中途被杀掉或断网，下次打开会**接着上次的地方继续**，不会从头再来。
-
-**Q：退出登录后，本地缓存会留下吗？**
-
-不会。退出时会完整清除这个账号在本机保存的照片索引和图片缓存。
-换账号或换区域时直接退出重登即可，如果你不放心的话也可以去系统设置里清除 App 数据。
-
-**Q：现在支持哪些功能？**
-
-目前仅可以**浏览** iCloud 照片、播放视频、下载到手机相册。
-「把手机本地照片自动备份到 iCloud」还在开发中，目前 Drive 和备忘录也是占位页面。
+**🎨 现代 UI 与 Monet 动态取色**
+采用 Material 3 风格设计，支持 Android 12+ Monet 动态系统取色，浅色与深色主题跟随系统。
 
 ---
 
-## 目前的进度
+## 🚀 怎么用
 
-| 功能 | 状态 |
-| --- | --- |
-| iCloud 登录（含两步验证） | ✅ 可用 |
-| 浏览照片与视频 | ✅ 可用 |
-| 月分组视图 + 年月快速跳转 | ✅ 可用 |
-| 视频播放 | ✅ 可用 |
-| 保存到手机相册 | ✅ 可用 |
-| 本地相册自动备份到 iCloud | 🚧 开发中 |
-| 动态照片（Live Photo）互转 | 🚧 计划中 |
-| iCloud Drive / 备忘录 | 🚧 计划中 |
+1. **安装并打开 App**：选择你的账号区域（中国大陆 / 国际区）。
+2. **登录 Apple ID**：点击登录按钮，在 iCloud.com 官方网页输入 Apple ID 与密码。
+3. **完成两步验证**：输入手机或设备收到的验证码；建议勾选「信任此浏览器」（可保持 30~60 天免重新登录）。
+4. **开始浏览与同步**：Enjoy it！
+5. **可选：激活系统云端媒体提供方**：进入「APP设置 -> 系统整合」，可通过 Shizuku 授权一键激活云端媒体提供方，让其他 App 选图时直接调用 iCloud 照片。
 
 ---
 
-## 需要知道的事
+## ❓ 常见问题
 
-**照片加载有时会慢一点**
+**Q：我的密码会被上传或泄露吗？**
+不会。登录完全通过本地 WebView 页面进行（和浏览器登录 `icloud.com` 完全一致）。App 仅加密保存登录成功后由 Apple 颁发的会话凭证（Cookies/Tokens）。
 
-iCloud 不会把照片直接给你，而是给一个限时的下载链接，链接大约 15~18 分钟后就失效。
-App 会自动处理换链，但如果图片加载失败，点一下重试通常就好了。
+**Q：为什么第一次整理图库要花一些时间？**
+如果你的 iCloud 图库有上万张照片，读取元数据需要遵循 Apple 接口的频次限制。App 采用增量流式整理，照片按时间从最新开始陆续显现，你可以边看边等，不用一次性跑完。
 
-**扫描大图库需要时间**
+**Q：在第三方 App 选图时怎么直接用 iCloud 照片？**
+Android 13+ 支持系统级的 PhotoPicker 云端扩展。在 iClouDroid 的「设置 -> 系统整合」中，可找到该选项
 
-如果 iCloud 里有上万张照片，完整整理可能需要几分钟。这是苹果接口的速度限制，
-不是 App 卡住了。
+**Q：本地相册自动备份是怎么工作的？**
+在「设置 -> 自动备份」中开启备份功能并勾选需要备份的本地文件夹。备份服务会在后台检测新照片，进行去重校验后流式上传至 iCloud，支持照片、视频与 Motion Photo。
 
-***这是一次性工作，不是实时同步***
-
-App 浏览的是你已经上传到 iCloud 的照片。你在 iPhone 上新拍的照片，
-需要等它上传到 iCloud 刷新后才能看到。
+**Q：退出登录后，本地数据会留存吗？**
+不会。退出登录后会抹除所有数据
 
 ---
 
-## 安装
+## 📊 目前的进度
 
-目前还没有发布到应用商店，需要通过 Android Studio 自行编译安装。
+| 功能模块 | 状态 | 说明 |
+| --- | --- | --- |
+| iCloud 登录 | ✅ 已可用 | 国区 / 国际区 |
+| 浏览照片与视频 | ✅ 已可用 | 日视图 / 月视图 |
+| 月分组视图 + 年月快速跳转 | ✅ 已可用 | 悬浮胶囊 + 3×4 月份封面 |
+| EXIF 元数据查看 | ✅ 已可用 | 机型/曝光/焦距/GPS 等数据完整显示 |
+| 云端 Live Photo 保存到手机相册| ✅ 已可用 | 自动转换为 Google Motion Photo |
+| 系统 PhotoPicker 集成 (CloudMediaProvider) | ✅ 已可用 | 适配 Android 13+，支持 Shizuku 一键激活 |
+| 本地相册自动备份上传至 iCloud | ✅ 已可用 | 支持本地相册增量上传，支持上传动态照片 |
+| 定时周期扫描与全量对账 | ✅ 已可用 | 自动感知云端删除与回收站状态 |
+| 动态 Monet 取色与深/浅色外观 | ✅ 已可用 | Material 3 风格 UI |
+| iCloud Drive / 备忘录 | 🚧 计划中 |预留|
 
-如果你只是想用，请找我要安装包，在手机上直接安装即可
+---
+
+## 📌 注意事项与须知
+
+- **下载链接时效**：iCloud 生成的直链实测有效期约为 15~18 分钟。App 内置了自动刷链与重试机制；若偶遇图片加载失败，再次点击或刷新即可恢复。
+- **照片更新同步**：你在 iPhone 或 Mac 上新拍的照片，需待其上传至 iCloud 并在 iClouDroid 触发增量同步后呈现。
+- **后台备份电池优化**：如开启了本地相册自动备份，建议在系统设置中将 iClouDroid 的电池优化设置为「不受限制」，以保障后台备份顺畅运行。
+
+---
+
+## 🛠️ 编译与构建（给开发者）
 
 <details>
-<summary>给开发者：如何自行构建</summary>
+<summary>点击展开开发者构建指南</summary>
 
 ### 环境要求
 
-- **Go** 1.21+（推荐 1.27）
-- **JDK** 17+（建议使用 Android Studio 随附的 JBR）
-- **Android SDK** API 35+，**NDK** 26+
+- **Go**：1.21+（推荐 1.27）
+- **JDK**：17+（建议使用 Android Studio 附带的 JBR）
+- **Android SDK**：API 35+
+- **Android NDK**：26+
 
 ### 构建步骤
 
-1. 先打包 Go 核心层（首次和每次改动 Go 代码后都要做）：
+1. **构建 Go 跨语言核心层**（首次构建或修改 `go-core/` 后必需）：
 
    ```bash
+   # 如果在某些网络环境下 sum.golang.org 不可达，可添加 GOSUMDB=off
    ./scripts/build_aar.sh
    ```
 
-   脚本会自动检测 `JAVA_HOME`、`ANDROID_HOME` 和 `ANDROID_NDK_HOME`，
-   在 `app/libs/` 下生成 `icloudcore.aar`。
+   该脚本会自动配置编译环境并在 `app/libs/` 下生成 `icloudcore.aar`。
 
-2. 编译 APK：
+2. **编译 Android APK**：
 
    ```bash
    ./gradlew :app:assembleDebug
    ```
 
-   产物在 `app/build/outputs/apk/debug/` 下。
+   构建产物位于 `app/build/outputs/apk/debug/app-debug.apk`。
 
-### 技术架构
+### 技术架构概览
 
 ```
 Android (Kotlin + Jetpack Compose)
     │
-    │  WebView 官方登录页 → 提取 Cookie → 加密存储
+    │  WebView 官方登录页 → 自动提取 Cookie → EncryptedSharedPreferences
     │
-    ▼  JNI (gomobile)
+    ▼  JNI / JNA (gomobile bind)
 Go 核心层 (go-core)
     │
-    │  CloudKit 私有协议 (ckdatabasews)
+    │  CloudKit 私有协议 (ckdatabasews / cvws)
     ▼
 iCloud 照片服务
 ```
 
-- **UI 层**：Jetpack Compose + Material 3，按月分组的 `LazyColumn`
-- **数据层**：Room 本地索引 + Coil 图片加载（缓存 Key 绑 `recordName`）
-- **协议层**：Go 实现 CloudKit `/records/query` 游标分页、`/records/changes` 增量同步
-- **后台任务**：WorkManager + 前台服务，扫描可断点续扫
+- **UI 层**：Jetpack Compose + Material 3，`LazyColumn` 行展开月分组网格、全屏手势查看器。
+- **数据与存储**：Room 本地数据库 (`photo_assets` / `photo_month_index`) + Coil 图片加载拦截器。
+- **系统集成**：Android 13 `CloudMediaProvider`，支持 Shizuku 注入 Shell 白名单。
+- **跨语言协议层**：Go 实现 CloudKit `/records/query` 游标分页、`/records/changes` 增量同步、`/assets/upload` MMCS 零内存流式上传。
 
-### 文档
+### 核心项目文档
 
-| 文档 | 内容 |
+| 文档 | 说明 |
 | --- | --- |
-| [docs/AGENTS.md](docs/AGENTS.md) | 开发规范（**新接手必读** 第 3、4、9 节） |
-| [docs/CHANGELOG_ISSUES.md](docs/CHANGELOG_ISSUES.md) | 已修复问题案例库（ISS-001 ~ ISS-029） |
-| [docs/PITFALLS.md](docs/PITFALLS.md) | 工程避坑指南 |
-| [docs/REFERENCE.md](docs/REFERENCE.md) | CloudKit 字段字典（实测）与开源参考 |
-| [docs/TODO.md](docs/TODO.md) | 分阶段路线图 |
-| [docs/list.md](docs/list.md) | 待修复问题清单 |
+| [docs/AGENTS.md](docs/AGENTS.md) | **开发者与 AI Agent 协助规范**（含架构约定、会话/URL 生命周期、血泪避坑铁律） |
+| [docs/CHANGELOG_ISSUES.md](docs/CHANGELOG_ISSUES.md) | **已修复问题案例库**（ISS-001 ~ ISS-046 完整现象、根因与验证记录） |
+| [docs/PITFALLS.md](docs/PITFALLS.md) | **工程避坑指南** |
+| [docs/REFERENCE.md](docs/REFERENCE.md) | **iCloud 协议实测逆向参考与 CloudKit 字段字典** |
+| [docs/TODO.md](docs/TODO.md) | **分阶段功能路线图** |
 
 </details>
 
 ---
 
-## 致谢
+## 🤝 致谢
 
-本项目在协议实现上参考了以下开源项目：
+本项目在协议逆向与实现过程中参考了以下开源项目：
 
-- [rclone/rclone](https://github.com/rclone/rclone) —— HTTP 会话与网络底座
-- [icloud-photos-downloader/icloud_photos_downloader](https://github.com/icloud-photos-downloader/icloud_photos_downloader) —— CloudKit 协议与字段结构参考
+- [rclone/rclone](https://github.com/rclone/rclone) —— HTTP 会话与网络通信底座
+- [icloud-photos-downloader/icloud_photos_downloader](https://github.com/icloud-photos-downloader/icloud_photos_downloader) —— CloudKit 协议结构与字段对照参考
 
 ---
 
-> **免责声明**：本项目为个人开发的第三方客户端，与 Apple Inc. 无关联。下载后请在 24 小时内删除。
-> 使用前请确保你了解 iCloud 的使用条款，并自行承担账号安全风险。
+> **免责声明**：本项目为个人开发的第三方开源/自由客户端，与 Apple Inc. 无任何关联。
+> 使用前请确保你了解并遵守 iCloud 的使用条款，并自行承担账号与数据相关风险。

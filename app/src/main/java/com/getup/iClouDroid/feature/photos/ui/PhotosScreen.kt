@@ -167,7 +167,37 @@ fun PhotosScreen(
                     // Day / Month View Switcher Capsule
                     ViewModeToggleCapsule(
                         currentMode = viewMode,
-                        onModeSelected = { viewModel.setGalleryViewMode(it) }
+                        onModeSelected = { newMode ->
+                            if (newMode != viewMode) {
+                                val anchor = GalleryViewModeSync.currentVisibleAnchor(
+                                    state = listState,
+                                    months = monthIndex,
+                                    monthPhotos = monthPhotos,
+                                    monthDaysMap = monthDaysMap,
+                                    viewMode = viewMode
+                                )
+                                viewModel.setGalleryViewMode(newMode)
+                                val targetIdx = if (newMode == GalleryViewMode.MONTH) {
+                                    GalleryViewModeSync.listIndexOfMonthView(
+                                        months = monthIndex,
+                                        columns = 5,
+                                        targetYearMonth = anchor.yearMonth,
+                                        targetPhotoIndexInMonth = anchor.photoIndexInMonth ?: 0
+                                    )
+                                } else {
+                                    GalleryViewModeSync.listIndexOfDayView(
+                                        months = monthIndex,
+                                        monthDaysMap = monthDaysMap,
+                                        columns = 3,
+                                        targetYearMonth = anchor.yearMonth,
+                                        targetDayKey = anchor.dayKey
+                                    )
+                                }
+                                if (targetIdx >= 0) {
+                                    scope.launch { listState.scrollToItem(targetIdx) }
+                                }
+                            }
+                        }
                     )
 
                     Spacer(Modifier.width(4.dp))
@@ -332,9 +362,9 @@ fun PhotosScreen(
                         months = monthIndex,
                         onJumpToMonth = { yearMonth ->
                             val idx = if (viewMode == GalleryViewMode.MONTH) {
-                                listIndexOfMonth(monthIndex, gridColumns, yearMonth)
+                                GalleryViewModeSync.listIndexOfMonthView(monthIndex, gridColumns, yearMonth, 0)
                             } else {
-                                listIndexOfMonthInDayView(monthIndex, monthDaysMap, gridColumns, yearMonth)
+                                GalleryViewModeSync.listIndexOfDayView(monthIndex, monthDaysMap, gridColumns, yearMonth, null)
                             }
                             if (idx >= 0) {
                                 scope.launch { listState.animateScrollToItem(idx) }
@@ -455,40 +485,7 @@ fun DayHeader(
 private const val GRID_RECEDE_SCALE = 0.06f
 private const val GRID_FADE = 0.88f
 
-private fun rowsFor(itemCount: Int, columns: Int): Int {
-    if (itemCount <= 0 || columns <= 0) return 0
-    return (itemCount + columns - 1) / columns
-}
-
-private fun listIndexOfMonth(
-    months: List<PhotoMonthIndexEntity>,
-    columns: Int,
-    yearMonth: Int
-): Int {
-    var index = 0
-    for (month in months) {
-        if (month.yearMonth == yearMonth) return index
-        index += 1 + rowsFor(month.itemCount, columns)
-    }
-    return -1
-}
-
-private fun listIndexOfMonthInDayView(
-    months: List<PhotoMonthIndexEntity>,
-    monthDaysMap: Map<Int, List<DayBucketing.DayGroup>>,
-    columns: Int,
-    yearMonth: Int
-): Int {
-    var index = 0
-    for (month in months) {
-        if (month.yearMonth == yearMonth) return index
-        val days = monthDaysMap[month.yearMonth].orEmpty()
-        for (day in days) {
-            index += 1 + rowsFor(day.photos.size, columns)
-        }
-    }
-    return -1
-}
+private fun rowsFor(itemCount: Int, columns: Int): Int = GalleryViewModeSync.rowsFor(itemCount, columns)
 
 @Composable
 private fun MonthRow(

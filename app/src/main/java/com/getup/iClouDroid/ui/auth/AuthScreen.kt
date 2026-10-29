@@ -19,6 +19,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -34,6 +35,7 @@ import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -91,6 +93,7 @@ fun AuthScreen(
                 is AuthUiState.NotLoggedIn -> {
                     NotLoggedInContent(
                         isChinaMainland = state.isChinaMainland,
+                        showSessionExpiredAlert = state.showSessionExpiredAlert,
                         diagnostics = cookieDiagnostic,
                         cookieProbe = viewModel.cookieProbe,
                         onRegionSelected = { viewModel.setRegion(it) },
@@ -111,7 +114,7 @@ fun AuthScreen(
                 is AuthUiState.Error -> {
                     ErrorContent(
                         errorMessage = state.errorMessage,
-                        onRetry = { viewModel.setRegion(state.isChinaMainland) }
+                        onRetry = { viewModel.setRegion(state.isChinaMainland, showExpiredAlert = true) }
                     )
                 }
             }
@@ -134,6 +137,7 @@ private fun CheckingContent() {
 @Composable
 private fun NotLoggedInContent(
     isChinaMainland: Boolean,
+    showSessionExpiredAlert: Boolean,
     diagnostics: CookieValidationResult?,
     cookieProbe: CookieProbe,
     onRegionSelected: (Boolean) -> Unit,
@@ -141,6 +145,23 @@ private fun NotLoggedInContent(
     onCookieDiagnostic: (CookieValidationResult) -> Unit,
     onForceExtract: () -> Unit
 ) {
+    var showAlert by rememberSaveable(showSessionExpiredAlert) {
+        mutableStateOf(showSessionExpiredAlert)
+    }
+
+    if (showAlert) {
+        AlertDialog(
+            onDismissRequest = { showAlert = false },
+            title = { Text("提示") },
+            text = { Text("登录失效，请重新登录") },
+            confirmButton = {
+                TextButton(onClick = { showAlert = false }) {
+                    Text("确认")
+                }
+            }
+        )
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
         // Region Switcher
         Column(
